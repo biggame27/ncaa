@@ -169,10 +169,44 @@ class NCAAScraper(BaseScraper):
             # Wait for page to load
             wait = WebDriverWait(self.driver, self.config.wait_timeout)
             
+            # If the page explicitly shows a no-games message, treat as non-error and stop
+            try:
+                no_games = self.driver.find_elements(By.CLASS_NAME, "no-games-message")
+                if no_games:
+                    no_games_msg = f"No games found on scoreboard page: {url}"
+                    self.logger.info(no_games_msg)
+                    self.send_notification(
+                        no_games_msg,
+                        ErrorType.INFO,
+                        division=division,
+                        date=date,
+                        gender=gender
+                    )
+                    return False
+            except Exception:
+                # If this probe fails, continue with normal flow
+                pass
+            
             try:
                 wait.until(EC.presence_of_element_located((By.CLASS_NAME, "gamePod-link")))
                 return True
             except TimeoutException:
+                # Double-check for explicit no-games message before treating as error
+                try:
+                    no_games = self.driver.find_elements(By.CLASS_NAME, "no-games-message")
+                    if no_games:
+                        no_games_msg = f"No games found on scoreboard page: {url}"
+                        self.logger.info(no_games_msg)
+                        self.send_notification(
+                            no_games_msg,
+                            ErrorType.INFO,
+                            division=division,
+                            date=date,
+                            gender=gender
+                        )
+                        return False
+                except Exception:
+                    pass
                 # Check for specific error pages
                 error_msg = SeleniumUtils.check_for_errors(self.driver)
                 if error_msg:
