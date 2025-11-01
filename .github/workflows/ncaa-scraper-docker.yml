@@ -70,7 +70,7 @@ jobs:
           echo "GOOGLE_TOKEN_FILE_B64 secret is missing" >&2; exit 1
         fi
 
-        # Create .env with required env vars (OAuth token path, no service account)
+        # Create .env with required env vars (OAuth token path)
         cat > .env << EOF
         GOOGLE_CLIENT_ID=${{ secrets.GOOGLE_CLIENT_ID }}
         GOOGLE_CLIENT_SECRET=${{ secrets.GOOGLE_CLIENT_SECRET }}
@@ -81,7 +81,6 @@ jobs:
         LOG_LEVEL=INFO
         UPLOAD_TO_GDRIVE=true
         GOOGLE_TOKEN_FILE=/app/token.pickle
-        GOOGLE_CREDENTIALS_JSON_B64=
         EOF
         
     - name: Verify Docker image exists

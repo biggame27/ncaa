@@ -5,7 +5,6 @@ import pickle
 import logging
 from typing import Optional
 from google.oauth2.credentials import Credentials
-from google.oauth2.service_account import Credentials as ServiceAccountCredentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
@@ -33,60 +32,29 @@ class GoogleDriveManager:
         try:
             creds = None
 
-            # Prefer service account in non-interactive environments
-            service_account_json = os.getenv('GOOGLE_CREDENTIALS_JSON')
-            service_account_json_b64 = os.getenv('GOOGLE_CREDENTIALS_JSON_B64')
-            credentials_file_path = os.getenv('GOOGLE_CREDENTIALS_FILE', 'credentials.json')
+            # Use OAuth token (load existing or create new)
+            if os.path.exists(self.config.token_file):
+                with open(self.config.token_file, 'rb') as token:
+                    creds = pickle.load(token)
 
-            # Allow base64-encoded JSON to avoid dotenv parsing issues
-            if service_account_json_b64 and not service_account_json:
-                try:
-                    import base64
-                    decoded = base64.b64decode(service_account_json_b64).decode('utf-8')
-                    service_account_json = decoded
-                except Exception as e:
-                    logger.warning(f"Failed to decode GOOGLE_CREDENTIALS_JSON_B64: {e}")
-
-            if service_account_json:
-                try:
-                    import json
-                    sa_info = json.loads(service_account_json)
-                    creds = ServiceAccountCredentials.from_service_account_info(sa_info, scopes=GOOGLE_DRIVE_SCOPES)
-                    logger.info("Authenticated with Google Drive using service account from environment JSON")
-                except Exception as e:
-                    logger.warning(f"Failed to load service account from GOOGLE_CREDENTIALS_JSON: {e}")
-
-            elif os.path.exists(credentials_file_path):
-                try:
-                    creds = ServiceAccountCredentials.from_service_account_file(credentials_file_path, scopes=GOOGLE_DRIVE_SCOPES)
-                    logger.info("Authenticated with Google Drive using service account file credentials.json")
-                except Exception as e:
-                    logger.warning(f"Failed to load service account from {credentials_file_path}: {e}")
-
-            if not creds:
-                # Fallback to OAuth user flow (interactive) or refresh existing token
-                if os.path.exists(self.config.token_file):
-                    with open(self.config.token_file, 'rb') as token:
-                        creds = pickle.load(token)
-
-                if not creds or not creds.valid:
-                    if creds and hasattr(creds, 'expired') and creds.expired and getattr(creds, 'refresh_token', None):
-                        creds.refresh(Request())
-                    else:
-                        client_config = {
-                            "installed": {
-                                "client_id": self.config.google_client_id,
-                                "client_secret": self.config.google_client_secret,
-                                "auth_uri": "https://accounts.google.com/o/oauth2/auth",
-                                "token_uri": "https://oauth2.googleapis.com/token",
-                                "redirect_uris": [self.config.google_redirect_uri]
-                            }
+            if not creds or not creds.valid:
+                if creds and hasattr(creds, 'expired') and creds.expired and getattr(creds, 'refresh_token', None):
+                    creds.refresh(Request())
+                else:
+                    client_config = {
+                        "installed": {
+                            "client_id": self.config.google_client_id,
+                            "client_secret": self.config.google_client_secret,
+                            "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+                            "token_uri": "https://oauth2.googleapis.com/token",
+                            "redirect_uris": [self.config.google_redirect_uri]
                         }
-                        flow = InstalledAppFlow.from_client_config(client_config, GOOGLE_DRIVE_SCOPES)
-                        creds = flow.run_local_server(port=0)
+                    }
+                    flow = InstalledAppFlow.from_client_config(client_config, GOOGLE_DRIVE_SCOPES)
+                    creds = flow.run_local_server(port=0)
 
-                    with open(self.config.token_file, 'wb') as token:
-                        pickle.dump(creds, token)
+                with open(self.config.token_file, 'wb') as token:
+                    pickle.dump(creds, token)
             
             self.service = build('drive', 'v3', credentials=creds)
             logger.info("Successfully authenticated with Google Drive")
