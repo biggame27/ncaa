@@ -110,8 +110,30 @@ class NCAAScraper(BaseScraper):
                 
                 # Scrape each game
                 scraped_games = []
-                for game_link in new_links:
+                for idx, game_link in enumerate(new_links):
                     try:
+                        # Recreate driver every 20 games to prevent memory/resource buildup
+                        if idx > 0 and idx % 20 == 0:
+                            self.logger.info(f"Recreating driver after {idx} games to prevent resource buildup...")
+                            try:
+                                SeleniumUtils.safe_quit_driver(self.driver)
+                            except Exception as e:
+                                self.logger.warning(f"Error quitting old driver: {e}")
+                            
+                            # Create new driver
+                            try:
+                                self.driver = SeleniumUtils.create_driver(headless=True, max_retries=3)
+                            except Exception as e:
+                                self.logger.error(f"Failed to recreate driver: {e}")
+                                # Try once more, then give up
+                                try:
+                                    SeleniumUtils._cleanup_driver_resources()
+                                    time.sleep(2)
+                                    self.driver = SeleniumUtils.create_driver(headless=True, max_retries=3)
+                                except Exception as e2:
+                                    self.logger.error(f"Failed to recreate driver after cleanup: {e2}")
+                                    return scraped_games  # Return what we have so far
+                        
                         game_data = self._scrape_single_game(
                             game_link, year, month, day, gender, division, csv_path
                         )
@@ -161,7 +183,29 @@ class NCAAScraper(BaseScraper):
             # Add human-like delay before loading
             SeleniumUtils.human_like_delay(1.0, 2.0)
             
-            self.driver.get(url)
+            # Navigate with timeout handling
+            try:
+                self.driver.get(url)
+            except TimeoutException:
+                self.logger.warning(f"Page load timeout for scoreboard {url}, attempting recovery...")
+                try:
+                    self.driver.execute_script("window.stop();")
+                    time.sleep(1)
+                except Exception:
+                    # Driver is stuck - recreate it
+                    self.logger.warning("Driver unresponsive, recreating...")
+                    try:
+                        SeleniumUtils.safe_quit_driver(self.driver)
+                        self.driver = SeleniumUtils.create_driver(headless=True, max_retries=3)
+                        # Retry the page load once
+                        try:
+                            self.driver.get(url)
+                        except Exception as e2:
+                            self.logger.error(f"Failed to load page after driver recreation: {e2}")
+                            return False
+                    except Exception as e2:
+                        self.logger.error(f"Failed to recreate driver: {e2}")
+                        return False
             
             # Add another delay after page load
             SeleniumUtils.human_like_delay(2.0, 4.0)
@@ -317,9 +361,19 @@ class NCAAScraper(BaseScraper):
         self.logger.info(f"Scraping: {game_link}")
         
         try:
-            # Navigate to game page
-            self.driver.get(game_link)
-            self.logger.info(f"Successfully navigated to: {game_link}")
+            # Navigate to game page with timeout handling
+            try:
+                self.driver.get(game_link)
+                self.logger.info(f"Successfully navigated to: {game_link}")
+            except TimeoutException:
+                self.logger.warning(f"Page load timeout for game {game_link}")
+                try:
+                    self.driver.execute_script("window.stop();")
+                    time.sleep(1)
+                except Exception:
+                    # Driver stuck, skip this game
+                    self.logger.error(f"Driver unresponsive for {game_link}, skipping...")
+                    return None
             
             # Wait for page to load
             wait = WebDriverWait(self.driver, self.config.wait_timeout)

@@ -136,6 +136,10 @@ class SeleniumUtils:
                 # Create driver
                 driver = webdriver.Chrome(service=service, options=options)
                 
+                # Set timeouts to prevent infinite hangs
+                driver.set_page_load_timeout(60)  # Max 60 seconds for page load
+                driver.set_script_timeout(30)     # Max 30 seconds for scripts
+                
                 # Execute anti-detection scripts
                 driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
                 driver.execute_script("Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3, 4, 5]})")
