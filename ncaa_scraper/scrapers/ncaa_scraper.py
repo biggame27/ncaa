@@ -206,6 +206,27 @@ class NCAAScraper(BaseScraper):
                     except Exception as e2:
                         self.logger.error(f"Failed to recreate driver: {e2}")
                         return False
+            except Exception as e:
+                # Catch ANY exception during get() - driver might be frozen
+                error_str = str(e)
+                if "HTTPConnectionPool" in error_str or "Read timed out" in error_str:
+                    self.logger.error(f"Driver frozen/unresponsive during scoreboard load for {url}: {e}")
+                    # Recreate driver and retry once
+                    try:
+                        SeleniumUtils.safe_quit_driver(self.driver)
+                        self.driver = SeleniumUtils.create_driver(headless=True, max_retries=3)
+                        # Retry the page load once
+                        try:
+                            self.driver.get(url)
+                        except Exception as e2:
+                            self.logger.error(f"Failed to load page after driver recreation: {e2}")
+                            return False
+                    except Exception as e2:
+                        self.logger.error(f"Failed to recreate driver: {e2}")
+                        return False
+                else:
+                    # Re-raise other exceptions
+                    raise
             
             # Add another delay after page load
             SeleniumUtils.human_like_delay(2.0, 4.0)
@@ -374,14 +395,44 @@ class NCAAScraper(BaseScraper):
                     # Driver stuck, skip this game
                     self.logger.error(f"Driver unresponsive for {game_link}, skipping...")
                     return None
+            except Exception as e:
+                # Catch ANY exception during get() - driver might be frozen
+                error_str = str(e)
+                if "HTTPConnectionPool" in error_str or "Read timed out" in error_str:
+                    self.logger.error(f"Driver frozen/unresponsive during page load for {game_link}: {e}")
+                    # Recreate driver for next game
+                    try:
+                        SeleniumUtils.safe_quit_driver(self.driver)
+                        self.driver = SeleniumUtils.create_driver(headless=True, max_retries=3)
+                    except Exception as e2:
+                        self.logger.error(f"Failed to recreate driver: {e2}")
+                    return None
+                else:
+                    # Re-raise other exceptions
+                    raise
             
             # Wait for page to load
             wait = WebDriverWait(self.driver, self.config.wait_timeout)
             
-            # Check for team selector
-            team_selector = SeleniumUtils.wait_for_element(
-                self.driver, By.CLASS_NAME, "boxscore-team-selector", self.config.wait_timeout
-            )
+            # Check for team selector with additional timeout protection
+            try:
+                team_selector = SeleniumUtils.wait_for_element(
+                    self.driver, By.CLASS_NAME, "boxscore-team-selector", self.config.wait_timeout
+                )
+            except Exception as e:
+                error_str = str(e)
+                if "HTTPConnectionPool" in error_str or "Read timed out" in error_str:
+                    self.logger.error(f"Driver frozen during element search for {game_link}: {e}")
+                    # Recreate driver
+                    try:
+                        SeleniumUtils.safe_quit_driver(self.driver)
+                        self.driver = SeleniumUtils.create_driver(headless=True, max_retries=3)
+                    except Exception as e2:
+                        self.logger.error(f"Failed to recreate driver: {e2}")
+                    return None
+                else:
+                    # Re-raise other exceptions (like TimeoutException from wait_for_element)
+                    raise
             if not team_selector:
                 error_msg = f"Box score page may not exist or is not available for {game_link}"
                 self.logger.warning(error_msg)
@@ -435,17 +486,30 @@ class NCAAScraper(BaseScraper):
                 return None
                 
         except Exception as e:
-            error_msg = f"Error scraping game {game_link}: {e}"
-            self.logger.error(error_msg)
-            self.send_notification(
-                error_msg,
-                ErrorType.GAME_ERROR,
-                division=division,
-                date=f"{year}-{month}-{day}",
-                gender=gender,
-                game_link=game_link
-            )
-            return None
+            # Check if this is a frozen driver error
+            error_str = str(e)
+            if "HTTPConnectionPool" in error_str or "Read timed out" in error_str:
+                self.logger.error(f"Driver frozen/unresponsive during game scrape for {game_link}: {e}")
+                # Recreate driver for next game
+                try:
+                    SeleniumUtils.safe_quit_driver(self.driver)
+                    self.driver = SeleniumUtils.create_driver(headless=True, max_retries=3)
+                except Exception as e2:
+                    self.logger.error(f"Failed to recreate driver: {e2}")
+                return None
+            else:
+                # Other errors - log and notify
+                error_msg = f"Error scraping game {game_link}: {e}"
+                self.logger.error(error_msg)
+                self.send_notification(
+                    error_msg,
+                    ErrorType.GAME_ERROR,
+                    division=division,
+                    date=f"{year}-{month}-{day}",
+                    gender=gender,
+                    game_link=game_link
+                )
+                return None
     
     def _extract_team_names(self, team_selector) -> List[str]:
         """Extract team names from the team selector."""
