@@ -368,6 +368,13 @@ class GoogleDriveManager:
             if not month_folder_id:
                 return None
             
+            # DEBUG: Check if gender folder already exists
+            existing_gender_folder = self.find_folder(gender, month_folder_id)
+            if existing_gender_folder:
+                logger.info(f"DEBUG: Gender folder '{gender}' already exists in month '{month}' (ID: {existing_gender_folder})")
+            else:
+                logger.info(f"DEBUG: Gender folder '{gender}' NOT found in month '{month}', will create new one")
+            
             # Create gender folder under month
             gender_folder_id = self.find_or_create_folder(gender, month_folder_id)
             if not gender_folder_id:
