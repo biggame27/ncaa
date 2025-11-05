@@ -617,8 +617,8 @@ class NCAAScraper(BaseScraper):
                 )
                 
                 if load_success is None:
-                    # Page load hung - force stop
-                    self.logger.warning(f"Page load hung for game {game_link}")
+                    # Page load hung - force stop and wait for page to stabilize
+                    self.logger.warning(f"Page load hung for game {game_link}, stopping and waiting for stabilization...")
                     try:
                         SeleniumUtils.safe_driver_operation(
                             self.driver,
@@ -626,16 +626,45 @@ class NCAAScraper(BaseScraper):
                             timeout=5,
                             operation_name="stop page load"
                         )
-                        time.sleep(1)
+                        # Wait longer for page to stabilize after stopping
+                        time.sleep(3)
+                        
+                        # Check if page is in a usable state
+                        try:
+                            wait = WebDriverWait(self.driver, 5)
+                            wait.until(EC.presence_of_element_located((By.TAG_NAME, "body")))
+                            # Wait a bit more for JavaScript to finish initializing
+                            time.sleep(2)
+                            self.logger.info(f"Page stabilized after stop, proceeding...")
+                        except TimeoutException:
+                            self.logger.warning(f"Page not stable after stop, will retry page load...")
+                            # Reload the page once
+                            try:
+                                reload_success = SeleniumUtils.safe_driver_operation(
+                                    self.driver,
+                                    lambda: self.driver.get(game_link),
+                                    timeout=90,
+                                    operation_name=f"reload game page after hung load {game_link}"
+                                )
+                                if reload_success is not None:
+                                    time.sleep(3)  # Wait for reload
+                                    self.logger.info(f"Successfully reloaded page after hung load")
+                                else:
+                                    self.logger.warning(f"Page reload also hung, will try to proceed anyway")
+                                    time.sleep(3)
+                            except Exception as reload_error:
+                                self.logger.warning(f"Error reloading page: {reload_error}, will try to proceed anyway")
                     except Exception:
                         # Driver stuck, skip this game
                         self.logger.error(f"Driver unresponsive for {game_link}, skipping...")
                         return None
                 else:
                     self.logger.info(f"Successfully navigated to: {game_link}")
+                    # Give page time to fully initialize even on successful load
+                    time.sleep(2)
                     
             except TimeoutException:
-                self.logger.warning(f"Page load timeout for game {game_link}")
+                self.logger.warning(f"Page load timeout for game {game_link}, stopping and waiting for stabilization...")
                 try:
                     SeleniumUtils.safe_driver_operation(
                         self.driver,
@@ -643,7 +672,18 @@ class NCAAScraper(BaseScraper):
                         timeout=5,
                         operation_name="stop page load"
                     )
-                    time.sleep(1)
+                    # Wait longer for page to stabilize after stopping
+                    time.sleep(3)
+                    
+                    # Check if page is in a usable state
+                    try:
+                        wait = WebDriverWait(self.driver, 5)
+                        wait.until(EC.presence_of_element_located((By.TAG_NAME, "body")))
+                        time.sleep(2)  # Additional wait for JavaScript initialization
+                        self.logger.info(f"Page stabilized after timeout stop, proceeding...")
+                    except TimeoutException:
+                        self.logger.warning(f"Page not stable after timeout stop, will try to proceed anyway")
+                        time.sleep(2)
                 except Exception:
                     # Driver stuck, skip this game
                     self.logger.error(f"Driver unresponsive for {game_link}, skipping...")
@@ -683,41 +723,94 @@ class NCAAScraper(BaseScraper):
                     # Re-raise other exceptions
                     raise
             
-            # Wait for page to load
+            # Wait for page to be ready before looking for elements
             wait = WebDriverWait(self.driver, self.config.wait_timeout)
             
-            # Check for team selector with additional timeout protection
+            # Wait for basic page structure to be ready
             try:
-                team_selector = SeleniumUtils.wait_for_element(
-                    self.driver, By.CLASS_NAME, "boxscore-team-selector", self.config.wait_timeout
-                )
-            except Exception as e:
-                error_str = str(e)
-                if "HTTPConnectionPool" in error_str or "Read timed out" in error_str:
-                    self.logger.error(f"Driver frozen during element search for {game_link}: {e}")
-                    # Aggressive cleanup and recreation
-                    try:
-                        SeleniumUtils._cleanup_driver_resources()
-                        SeleniumUtils.safe_quit_driver(self.driver)
-                    except Exception as e2:
-                        self.logger.warning(f"Error during cleanup: {e2}")
+                wait.until(EC.presence_of_element_located((By.TAG_NAME, "body")))
+                time.sleep(1)  # Additional stabilization
+            except TimeoutException:
+                self.logger.warning(f"Page body not found, page may not be loaded properly")
+            
+            # Check for team selector with retry logic (especially important after hung page loads)
+            team_selector = None
+            max_selector_retries = 3
+            
+            for selector_attempt in range(max_selector_retries):
+                try:
+                    if selector_attempt > 0:
+                        self.logger.info(f"Retrying to find team selector (attempt {selector_attempt + 1}/{max_selector_retries}) for {game_link}")
+                        time.sleep(2)  # Wait between retries
                     
-                    time.sleep(5)
+                    team_selector = SeleniumUtils.wait_for_element(
+                        self.driver, By.CLASS_NAME, "boxscore-team-selector", 
+                        self.config.wait_timeout + (5 * selector_attempt)  # Longer timeout on retries
+                    )
                     
-                    try:
-                        self.driver = SeleniumUtils.create_driver(headless=True, max_retries=3)
-                    except Exception as e2:
-                        self.logger.error(f"Failed to recreate driver: {e2}")
-                        SeleniumUtils._cleanup_driver_resources()
-                        time.sleep(10)
+                    # If found, verify it's actually usable
+                    if team_selector:
                         try:
-                            self.driver = SeleniumUtils.create_driver(headless=True, max_retries=3)
-                        except Exception as e3:
-                            self.logger.error(f"Failed to recreate driver after extended wait: {e3}")
-                    return None
-                else:
-                    # Re-raise other exceptions (like TimeoutException from wait_for_element)
-                    raise
+                            # Verify it has content
+                            child_divs = SeleniumUtils.safe_driver_operation(
+                                self.driver,
+                                lambda: team_selector.find_elements(By.TAG_NAME, "div"),
+                                timeout=10,
+                                default_return=[],
+                                operation_name="verify team selector has content"
+                            )
+                            if child_divs and len(child_divs) >= 2:
+                                self.logger.info(f"Successfully found team selector with {len(child_divs)} teams")
+                                break  # Success, exit retry loop
+                            else:
+                                self.logger.warning(f"Team selector found but has insufficient teams ({len(child_divs) if child_divs else 0}), retrying...")
+                                team_selector = None
+                                if selector_attempt < max_selector_retries - 1:
+                                    continue
+                        except Exception as verify_error:
+                            self.logger.warning(f"Error verifying team selector: {verify_error}, retrying...")
+                            team_selector = None
+                            if selector_attempt < max_selector_retries - 1:
+                                continue
+                    else:
+                        if selector_attempt < max_selector_retries - 1:
+                            continue
+                            
+                except Exception as e:
+                    error_str = str(e)
+                    if "HTTPConnectionPool" in error_str or "Read timed out" in error_str:
+                        self.logger.error(f"Driver frozen during element search for {game_link} (attempt {selector_attempt + 1}/{max_selector_retries}): {e}")
+                        if selector_attempt < max_selector_retries - 1:
+                            # Try to recover driver before retrying
+                            try:
+                                SeleniumUtils._cleanup_driver_resources()
+                                SeleniumUtils.safe_quit_driver(self.driver)
+                                time.sleep(5)
+                                self.driver = SeleniumUtils.create_driver(headless=True, max_retries=3)
+                                # Reload the page
+                                SeleniumUtils.safe_driver_operation(
+                                    self.driver,
+                                    lambda: self.driver.get(game_link),
+                                    timeout=90,
+                                    operation_name=f"reload game page after driver recovery {game_link}"
+                                )
+                                time.sleep(3)
+                                continue  # Retry finding selector
+                            except Exception as e2:
+                                self.logger.error(f"Failed to recover driver: {e2}")
+                                return None
+                        else:
+                            # Final attempt failed
+                            return None
+                    else:
+                        # Other exceptions - retry if attempts remain
+                        if selector_attempt < max_selector_retries - 1:
+                            self.logger.warning(f"Error finding team selector (attempt {selector_attempt + 1}/{max_selector_retries}): {e}")
+                            continue
+                        else:
+                            # Final attempt failed
+                            raise
+            
             if not team_selector:
                 error_msg = f"Box score page may not exist or is not available for {game_link}"
                 self.logger.warning(error_msg)
