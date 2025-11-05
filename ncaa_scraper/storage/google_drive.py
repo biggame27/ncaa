@@ -198,27 +198,33 @@ class GoogleDriveManager:
             else:
                 existing_file_id = self.file_exists(file_name, folder_id)
             
-            file_metadata = {
-                'name': file_name,
-            }
-            
-            if folder_id:
-                file_metadata['parents'] = [folder_id]
-            
             media = MediaFileUpload(file_path, resumable=True)
             
             if existing_file_id:
                 # Update existing file
+                # Note: Cannot set 'parents' in update requests - must use addParents/removeParents
+                # Since file is already in the correct folder, we don't need to change parents
+                update_metadata = {
+                    'name': file_name,
+                }
+                
                 file = self.service.files().update(
                     fileId=existing_file_id,
-                    body=file_metadata,
+                    body=update_metadata,  # No 'parents' field here
                     media_body=media,
                     fields='id',
                     supportsAllDrives=True
                 ).execute()
                 logger.info(f"Successfully updated {file_path} in Google Drive. File ID: {file.get('id')}")
             else:
-                # Create new file
+                # Create new file - parents field is allowed here
+                file_metadata = {
+                    'name': file_name,
+                }
+                
+                if folder_id:
+                    file_metadata['parents'] = [folder_id]
+                
                 file = self.service.files().create(
                     body=file_metadata,
                     media_body=media,
