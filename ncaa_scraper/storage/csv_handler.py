@@ -106,3 +106,61 @@ class CSVHandler:
         
         required_columns = ['GAMEID', 'TEAM', 'OPP', 'GAMELINK']
         return all(col in df.columns for col in required_columns)
+    
+    def get_game_data_by_link(self, csv_path: str, game_link: str) -> Optional[pd.DataFrame]:
+        """
+        Get all rows for a specific game link from CSV file.
+        
+        Args:
+            csv_path: Path to the CSV file
+            game_link: Game link to search for
+        
+        Returns:
+            DataFrame with game data rows, or None if not found
+        """
+        df = self.read_csv_safely(csv_path)
+        if df is None or 'GAMELINK' not in df.columns:
+            return None
+        
+        game_rows = df[df['GAMELINK'] == game_link].copy()
+        if game_rows.empty:
+            return None
+        
+        return game_rows
+    
+    def update_duplicate_flag(self, csv_path: str, game_link: str, duplicate_value: bool = True) -> bool:
+        """
+        Update DUPLICATE_ACROSS_DIVISIONS flag for a game in CSV file.
+        
+        Args:
+            csv_path: Path to the CSV file
+            game_link: Game link to update
+            duplicate_value: Value to set for DUPLICATE_ACROSS_DIVISIONS
+        
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            df = self.read_csv_safely(csv_path)
+            if df is None:
+                return False
+            
+            if 'GAMELINK' not in df.columns:
+                return False
+            
+            # Ensure DUPLICATE_ACROSS_DIVISIONS column exists
+            if 'DUPLICATE_ACROSS_DIVISIONS' not in df.columns:
+                df['DUPLICATE_ACROSS_DIVISIONS'] = False
+            
+            # Update rows for this game
+            mask = df['GAMELINK'] == game_link
+            df.loc[mask, 'DUPLICATE_ACROSS_DIVISIONS'] = duplicate_value
+            
+            # Save updated CSV
+            df.to_csv(csv_path, index=False)
+            logger.info(f"Updated DUPLICATE_ACROSS_DIVISIONS flag for game {game_link} in {csv_path}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error updating duplicate flag in {csv_path}: {e}")
+            return False

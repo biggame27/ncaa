@@ -36,6 +36,7 @@ class GameData:
     date: str
     division: str
     gender: str
+    duplicate_across_divisions: bool = False  # Flag to mark if this game was already scraped in another division
     
     def to_combined_dataframe(self) -> pd.DataFrame:
         """Convert to combined pandas DataFrame for CSV export."""
@@ -48,11 +49,13 @@ class GameData:
         team_one_df['OPP'] = self.team_one.opponent_name
         team_one_df['GAMEID'] = self.game_id
         team_one_df['GAMELINK'] = self.game_link
+        team_one_df['DUPLICATE_ACROSS_DIVISIONS'] = self.duplicate_across_divisions
         
         team_two_df['TEAM'] = self.team_two.team_name
         team_two_df['OPP'] = self.team_two.opponent_name
         team_two_df['GAMEID'] = self.game_id
         team_two_df['GAMELINK'] = self.game_link
+        team_two_df['DUPLICATE_ACROSS_DIVISIONS'] = self.duplicate_across_divisions
         
         # Combine both teams
         combined_df = pd.concat([team_one_df, team_two_df], ignore_index=True)

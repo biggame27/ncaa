@@ -19,7 +19,7 @@ class BaseScraper(ABC):
     def __init__(self, config: ScraperConfig):
         self.config = config
         self.logger = logging.getLogger(self.__class__.__name__)
-        self.visited_links: Set[str] = set()
+        self.visited_links: Dict[str, str] = {}  # Dict[game_link, division] to track cross-division duplicates
         
         # Initialize components
         self.file_manager = FileManager(config.output_dir)

@@ -80,6 +80,19 @@ class SeleniumUtils:
                 options.add_argument("--disable-features=TranslateUI")
                 options.add_argument("--disable-ipc-flooding-protection")
                 
+                # Memory and performance optimizations to prevent hangs
+                options.add_argument("--memory-pressure-off")
+                options.add_argument("--max_old_space_size=4096")  # Limit memory usage
+                options.add_argument("--disable-background-networking")
+                options.add_argument("--disable-background-timer-throttling")
+                options.add_argument("--disable-breakpad")
+                options.add_argument("--disable-hang-monitor")
+                options.add_argument("--disable-prompt-on-repost")
+                options.add_argument("--disable-renderer-backgrounding")
+                options.add_argument("--force-color-profile=srgb")
+                options.add_argument("--metrics-recording-only")
+                options.add_argument("--enable-automation")
+                
                 # Anti-detection measures
                 options.add_argument("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
                 options.add_argument("--accept-language=en-US,en;q=0.9")
@@ -141,15 +154,25 @@ class SeleniumUtils:
                 driver.set_script_timeout(30)     # Max 30 seconds for scripts
                 
                 # Execute anti-detection scripts
-                driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
-                driver.execute_script("Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3, 4, 5]})")
-                driver.execute_script("Object.defineProperty(navigator, 'languages', {get: () => ['en-US', 'en']})")
-                driver.execute_script("window.chrome = {runtime: {}}")
-                driver.execute_script("Object.defineProperty(navigator, 'permissions', {get: () => ({query: () => Promise.resolve({state: 'granted'})})})")
+                # Note: These are fast operations right after driver creation, so timeout protection
+                # is less critical here, but we wrap in try/except for safety
+                try:
+                    driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+                    driver.execute_script("Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3, 4, 5]})")
+                    driver.execute_script("Object.defineProperty(navigator, 'languages', {get: () => ['en-US', 'en']})")
+                    driver.execute_script("window.chrome = {runtime: {}}")
+                    driver.execute_script("Object.defineProperty(navigator, 'permissions', {get: () => ({query: () => Promise.resolve({state: 'granted'})})})")
+                except Exception as e:
+                    logger.warning(f"Error setting anti-detection properties: {e}")
+                    # Continue anyway - these are nice-to-have
                 
                 # Test the driver
-                driver.get("about:blank")
-                driver.execute_script("return navigator.userAgent")
+                try:
+                    driver.get("about:blank")
+                    driver.execute_script("return navigator.userAgent")
+                except Exception as e:
+                    logger.warning(f"Driver test failed: {e}")
+                    # Continue anyway - driver might still work
                 
                 logger.info("Chrome driver created successfully")
                 return driver
@@ -205,9 +228,60 @@ class SeleniumUtils:
         time.sleep(delay)
     
     @staticmethod
+    def safe_driver_operation(driver, operation, timeout=10, default_return=None, operation_name="driver operation"):
+        """
+        Safely execute a driver operation with timeout protection.
+        
+        This prevents read timeout errors by wrapping driver operations in a thread
+        with a timeout, so if ChromeDriver becomes unresponsive, we don't wait
+        indefinitely.
+        
+        Args:
+            driver: WebDriver instance
+            operation: Callable that performs the driver operation
+            timeout: Maximum time to wait in seconds
+            default_return: Value to return if operation times out
+            operation_name: Name of operation for logging
+        
+        Returns:
+            Result of operation or default_return if timeout
+        
+        Raises:
+            Exception: If operation raises an exception (not timeout)
+        """
+        import threading
+        result = [None]
+        exception = [None]
+        completed = [False]
+        
+        def execute():
+            try:
+                result[0] = operation()
+                completed[0] = True
+            except Exception as e:
+                exception[0] = e
+                completed[0] = True
+        
+        thread = threading.Thread(target=execute)
+        thread.daemon = True
+        thread.start()
+        thread.join(timeout=timeout)
+        
+        if not completed[0]:
+            logger.warning(f"Driver operation '{operation_name}' timed out after {timeout} seconds")
+            return default_return
+        elif exception[0]:
+            raise exception[0]
+        else:
+            return result[0]
+    
+    @staticmethod
     def safe_quit_driver(driver: Optional[webdriver.Chrome]) -> bool:
         """
-        Safely quit a WebDriver instance.
+        Safely quit a WebDriver instance with timeout protection.
+        
+        This prevents read timeout errors during cleanup by using timeout
+        protection on all driver operations.
         
         Args:
             driver: WebDriver instance to quit
@@ -219,20 +293,49 @@ class SeleniumUtils:
             return True
             
         try:
-            # Try to close all windows first
-            for handle in driver.window_handles:
-                driver.switch_to.window(handle)
-                driver.close()
+            # Try to get window handles with timeout protection
+            handles = SeleniumUtils.safe_driver_operation(
+                driver,
+                lambda: driver.window_handles,
+                timeout=5,
+                default_return=[],
+                operation_name="get window handles"
+            )
             
-            # Then quit the driver
-            driver.quit()
+            # Close windows with timeout protection
+            if handles:
+                for handle in handles:
+                    try:
+                        SeleniumUtils.safe_driver_operation(
+                            driver,
+                            lambda h=handle: driver.switch_to.window(h),
+                            timeout=2,
+                            operation_name=f"switch to window {handle}"
+                        )
+                        SeleniumUtils.safe_driver_operation(
+                            driver,
+                            lambda: driver.close(),
+                            timeout=2,
+                            operation_name="close window"
+                        )
+                    except Exception as e:
+                        logger.debug(f"Error closing window {handle}: {e}")
+                        pass  # Continue with other windows
+            
+            # Quit driver with timeout protection
+            SeleniumUtils.safe_driver_operation(
+                driver,
+                lambda: driver.quit(),
+                timeout=10,
+                operation_name="quit driver"
+            )
             logger.info("Driver quit successfully")
             return True
             
         except Exception as e:
             logger.warning(f"Error quitting driver: {e}")
+            # Try one more time without timeout protection as last resort
             try:
-                # Force quit if normal quit fails
                 driver.quit()
                 return True
             except Exception:

@@ -2,7 +2,7 @@
 
 import time
 import logging
-from typing import List, Optional, Set
+from typing import List, Optional, Set, Dict
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
@@ -99,14 +99,31 @@ class NCAAScraper(BaseScraper):
                     )
                     return []
                 
-                # Filter out already visited links
-                new_links = [link for link in game_links if link not in self.visited_links]
+                # Filter links - keep cross-division duplicates, skip same-division duplicates
+                new_links = []
+                cross_division_duplicates = []
+                for link in game_links:
+                    if link in self.visited_links:
+                        # Check if it was visited in a different division
+                        previous_division = self.visited_links[link]
+                        if previous_division != division:
+                            # Cross-division duplicate - scrape it but mark it
+                            cross_division_duplicates.append(link)
+                            new_links.append(link)
+                        # If same division, skip it (already visited in this division)
+                    else:
+                        # Not visited yet
+                        new_links.append(link)
+                
                 skipped_count = len(game_links) - len(new_links)
                 
                 if skipped_count > 0:
-                    self.logger.info(f"Found {len(game_links)} total games, {skipped_count} already visited, {len(new_links)} new games to scrape")
+                    self.logger.info(f"Found {len(game_links)} total games, {skipped_count} already visited in same division, {len(new_links)} new games to scrape")
                 else:
                     self.logger.info(f"Found {len(game_links)} games to scrape")
+                
+                if cross_division_duplicates:
+                    self.logger.info(f"Found {len(cross_division_duplicates)} cross-division duplicate games that will be marked")
                 
                 # Scrape each game
                 scraped_games = []
@@ -139,7 +156,8 @@ class NCAAScraper(BaseScraper):
                         )
                         if game_data:
                             scraped_games.append(game_data)
-                            self.visited_links.add(game_link)
+                            # Update visited_links with current division
+                            self.visited_links[game_link] = division
                     except Exception as e:
                         self.logger.error(f"Error scraping game {game_link}: {e}")
                         self.send_notification(
@@ -183,13 +201,56 @@ class NCAAScraper(BaseScraper):
             # Add human-like delay before loading
             SeleniumUtils.human_like_delay(1.0, 2.0)
             
-            # Navigate with timeout handling
+            # Navigate with timeout handling and protection against read timeouts
             try:
-                self.driver.get(url)
+                # Use safe_driver_operation to prevent read timeout errors
+                load_success = SeleniumUtils.safe_driver_operation(
+                    self.driver,
+                    lambda: self.driver.get(url),
+                    timeout=90,  # 90 seconds max (longer than page_load_timeout of 60s)
+                    operation_name=f"load scoreboard page {url}"
+                )
+                
+                if load_success is None:
+                    # Page load hung - force stop
+                    self.logger.warning(f"Page load hung for scoreboard {url}, attempting recovery...")
+                    try:
+                        SeleniumUtils.safe_driver_operation(
+                            self.driver,
+                            lambda: self.driver.execute_script("window.stop();"),
+                            timeout=5,
+                            operation_name="stop page load"
+                        )
+                        time.sleep(1)
+                    except Exception:
+                        # Driver is stuck - recreate it
+                        self.logger.warning("Driver unresponsive, recreating...")
+                        try:
+                            SeleniumUtils.safe_quit_driver(self.driver)
+                            self.driver = SeleniumUtils.create_driver(headless=True, max_retries=3)
+                            # Retry the page load once
+                            load_success = SeleniumUtils.safe_driver_operation(
+                                self.driver,
+                                lambda: self.driver.get(url),
+                                timeout=90,
+                                operation_name=f"retry load scoreboard page {url}"
+                            )
+                            if load_success is None:
+                                self.logger.error(f"Page load still hung after driver recreation for {url}")
+                                return False
+                        except Exception as e2:
+                            self.logger.error(f"Failed to recreate driver: {e2}")
+                            return False
+                            
             except TimeoutException:
                 self.logger.warning(f"Page load timeout for scoreboard {url}, attempting recovery...")
                 try:
-                    self.driver.execute_script("window.stop();")
+                    SeleniumUtils.safe_driver_operation(
+                        self.driver,
+                        lambda: self.driver.execute_script("window.stop();"),
+                        timeout=5,
+                        operation_name="stop page load"
+                    )
                     time.sleep(1)
                 except Exception:
                     # Driver is stuck - recreate it
@@ -198,10 +259,14 @@ class NCAAScraper(BaseScraper):
                         SeleniumUtils.safe_quit_driver(self.driver)
                         self.driver = SeleniumUtils.create_driver(headless=True, max_retries=3)
                         # Retry the page load once
-                        try:
-                            self.driver.get(url)
-                        except Exception as e2:
-                            self.logger.error(f"Failed to load page after driver recreation: {e2}")
+                        load_success = SeleniumUtils.safe_driver_operation(
+                            self.driver,
+                            lambda: self.driver.get(url),
+                            timeout=90,
+                            operation_name=f"retry load scoreboard page {url}"
+                        )
+                        if load_success is None:
+                            self.logger.error(f"Failed to load page after driver recreation: {url}")
                             return False
                     except Exception as e2:
                         self.logger.error(f"Failed to recreate driver: {e2}")
@@ -216,10 +281,14 @@ class NCAAScraper(BaseScraper):
                         SeleniumUtils.safe_quit_driver(self.driver)
                         self.driver = SeleniumUtils.create_driver(headless=True, max_retries=3)
                         # Retry the page load once
-                        try:
-                            self.driver.get(url)
-                        except Exception as e2:
-                            self.logger.error(f"Failed to load page after driver recreation: {e2}")
+                        load_success = SeleniumUtils.safe_driver_operation(
+                            self.driver,
+                            lambda: self.driver.get(url),
+                            timeout=90,
+                            operation_name=f"retry load scoreboard page {url}"
+                        )
+                        if load_success is None:
+                            self.logger.error(f"Failed to load page after driver recreation: {url}")
                             return False
                     except Exception as e2:
                         self.logger.error(f"Failed to recreate driver: {e2}")
@@ -376,20 +445,87 @@ class NCAAScraper(BaseScraper):
         
         # Check if already visited in this session
         if game_link in self.visited_links:
-            self.logger.info(f"Game link {game_link} already visited in this session, skipping...")
-            return None
+            previous_division = self.visited_links[game_link]
+            if previous_division == division:
+                # Same division - skip
+                self.logger.info(f"Game link {game_link} already visited in this session for {division}, skipping...")
+                return None
+            else:
+                # Different division - reuse existing data instead of rescraping
+                self.logger.info(f"Game link {game_link} already scraped in {previous_division}, reusing existing data for {division}")
+                
+                # Get the CSV path for the previous division
+                previous_csv_path = self.file_manager.get_csv_path(year, month, day, gender, previous_division)
+                
+                # Read the game data from the previous division's CSV
+                existing_game_data = self.csv_handler.get_game_data_by_link(previous_csv_path, game_link)
+                
+                if existing_game_data is not None and not existing_game_data.empty:
+                    # Update the previous division's CSV to mark it as duplicate
+                    self.csv_handler.update_duplicate_flag(previous_csv_path, game_link, duplicate_value=True)
+                    
+                    # Copy the data to current division's CSV with duplicate flag set
+                    existing_game_data = existing_game_data.copy()
+                    
+                    # Ensure DUPLICATE_ACROSS_DIVISIONS column exists and set to True
+                    if 'DUPLICATE_ACROSS_DIVISIONS' not in existing_game_data.columns:
+                        existing_game_data['DUPLICATE_ACROSS_DIVISIONS'] = True
+                    else:
+                        existing_game_data['DUPLICATE_ACROSS_DIVISIONS'] = True
+                    
+                    # Append to current division's CSV
+                    if self.csv_handler.append_game_data(csv_path, existing_game_data):
+                        self.logger.info(f"Successfully copied game data from {previous_division} to {division} CSV")
+                        # Update visited_links with current division
+                        self.visited_links[game_link] = division
+                        return None  # Return None since we didn't create new GameData
+                    else:
+                        self.logger.error(f"Failed to copy game data to {division} CSV")
+                        # Fall through to scrape it anyway
+                else:
+                    self.logger.warning(f"Could not find existing game data in {previous_division} CSV, will scrape instead")
+                    # Fall through to scrape it
         
         self.logger.info(f"Scraping: {game_link}")
         
         try:
-            # Navigate to game page with timeout handling
+            # Navigate to game page with timeout handling and protection against read timeouts
             try:
-                self.driver.get(game_link)
-                self.logger.info(f"Successfully navigated to: {game_link}")
+                # Use safe_driver_operation to prevent read timeout errors
+                load_success = SeleniumUtils.safe_driver_operation(
+                    self.driver,
+                    lambda: self.driver.get(game_link),
+                    timeout=90,  # 90 seconds max (longer than page_load_timeout of 60s)
+                    operation_name=f"load game page {game_link}"
+                )
+                
+                if load_success is None:
+                    # Page load hung - force stop
+                    self.logger.warning(f"Page load hung for game {game_link}")
+                    try:
+                        SeleniumUtils.safe_driver_operation(
+                            self.driver,
+                            lambda: self.driver.execute_script("window.stop();"),
+                            timeout=5,
+                            operation_name="stop page load"
+                        )
+                        time.sleep(1)
+                    except Exception:
+                        # Driver stuck, skip this game
+                        self.logger.error(f"Driver unresponsive for {game_link}, skipping...")
+                        return None
+                else:
+                    self.logger.info(f"Successfully navigated to: {game_link}")
+                    
             except TimeoutException:
                 self.logger.warning(f"Page load timeout for game {game_link}")
                 try:
-                    self.driver.execute_script("window.stop();")
+                    SeleniumUtils.safe_driver_operation(
+                        self.driver,
+                        lambda: self.driver.execute_script("window.stop();"),
+                        timeout=5,
+                        operation_name="stop page load"
+                    )
                     time.sleep(1)
                 except Exception:
                     # Driver stuck, skip this game
@@ -466,6 +602,12 @@ class NCAAScraper(BaseScraper):
             if not team_two_data:
                 return None
             
+            # Check if this is a cross-division duplicate
+            is_cross_division_duplicate = (
+                game_link in self.visited_links and 
+                self.visited_links[game_link] != division
+            )
+            
             # Create game data
             game_data = GameData(
                 game_id=game_id,
@@ -474,7 +616,8 @@ class NCAAScraper(BaseScraper):
                 team_two=team_two_data,
                 date=f"{year}-{month}-{day}",
                 division=division,
-                gender=gender
+                gender=gender,
+                duplicate_across_divisions=is_cross_division_duplicate
             )
             
             # Save to CSV
