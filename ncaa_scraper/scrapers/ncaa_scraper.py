@@ -85,8 +85,8 @@ class NCAAScraper(BaseScraper):
                 if not self._load_scoreboard_page(url, division, gender, f"{year}-{month}-{day}"):
                     return []
                 
-                # Get game links
-                game_links = self._extract_game_links()
+                # Get game links (pass URL for retry purposes)
+                game_links = self._extract_game_links(url)
                 if not game_links:
                     no_links_msg = f"No valid game links found for {url}"
                     self.logger.warning(no_links_msg)
@@ -243,6 +243,8 @@ class NCAAScraper(BaseScraper):
                             if load_success is None:
                                 self.logger.error(f"Page load still hung after driver recreation for {url}")
                                 return False
+                            # Give page time to stabilize after recovery
+                            time.sleep(3)
                         except Exception as e2:
                             self.logger.error(f"Failed to recreate driver: {e2}")
                             return False
@@ -273,6 +275,8 @@ class NCAAScraper(BaseScraper):
                         if load_success is None:
                             self.logger.error(f"Failed to load page after driver recreation: {url}")
                             return False
+                        # Give page time to stabilize after recovery
+                        time.sleep(3)
                     except Exception as e2:
                         self.logger.error(f"Failed to recreate driver: {e2}")
                         return False
@@ -295,6 +299,8 @@ class NCAAScraper(BaseScraper):
                         if load_success is None:
                             self.logger.error(f"Failed to load page after driver recreation: {url}")
                             return False
+                        # Give page time to stabilize after recovery
+                        time.sleep(3)
                     except Exception as e2:
                         self.logger.error(f"Failed to recreate driver: {e2}")
                         return False
@@ -302,8 +308,22 @@ class NCAAScraper(BaseScraper):
                     # Re-raise other exceptions
                     raise
             
-            # Add another delay after page load
+            # Add another delay after page load to ensure stability
             SeleniumUtils.human_like_delay(2.0, 4.0)
+            
+            # Verify driver is responsive before proceeding
+            try:
+                test_result = SeleniumUtils.safe_driver_operation(
+                    self.driver,
+                    lambda: self.driver.current_url,
+                    timeout=5,
+                    default_return=None,
+                    operation_name="verify driver responsive"
+                )
+                if test_result is None:
+                    self.logger.warning("Driver not responsive after page load, may need recovery")
+            except Exception as e:
+                self.logger.warning(f"Driver health check failed: {e}")
             
             # Wait for page to load
             wait = WebDriverWait(self.driver, self.config.wait_timeout)
@@ -407,28 +427,116 @@ class NCAAScraper(BaseScraper):
             )
             return False
     
-    def _extract_game_links(self) -> List[str]:
-        """Extract game links from the scoreboard page."""
-        try:
-            box_scores = self.driver.find_elements(By.CLASS_NAME, "gamePod-link")
-            game_links = [box_score.get_attribute('href') for box_score in box_scores if box_score.get_attribute('href')]
-            return game_links
-        except WebDriverException as e:
-            error_msg = f"Selenium error finding game links: {e}"
-            self.logger.error(error_msg)
-            self.send_notification(
-                error_msg,
-                ErrorType.ERROR
-            )
-            return []
-        except Exception as e:
-            error_msg = f"Unexpected error finding game links: {e}"
-            self.logger.error(error_msg)
-            self.send_notification(
-                error_msg,
-                ErrorType.ERROR
-            )
-            return []
+    def _extract_game_links(self, scoreboard_url: Optional[str] = None) -> List[str]:
+        """Extract game links from the scoreboard page with retry logic."""
+        max_retries = 3
+        
+        for attempt in range(max_retries):
+            try:
+                if attempt > 0:
+                    delay = 2 * (attempt)  # 2s, 4s delays
+                    self.logger.info(f"Retrying game link extraction (attempt {attempt + 1}/{max_retries}) after {delay}s delay")
+                    time.sleep(delay)
+                
+                # Wrap find_elements in safe_driver_operation to prevent timeouts
+                box_scores = SeleniumUtils.safe_driver_operation(
+                    self.driver,
+                    lambda: self.driver.find_elements(By.CLASS_NAME, "gamePod-link"),
+                    timeout=30,  # Shorter timeout to fail fast
+                    default_return=[],
+                    operation_name="find game links"
+                )
+                
+                if not box_scores:
+                    if attempt < max_retries - 1:
+                        self.logger.warning(f"No game links found, retrying...")
+                        continue
+                    self.logger.warning("No game links found after all retries")
+                    return []
+                
+                # Extract hrefs with timeout protection
+                game_links = []
+                for box_score in box_scores:
+                    href = SeleniumUtils.safe_driver_operation(
+                        self.driver,
+                        lambda bs=box_score: bs.get_attribute('href'),
+                        timeout=10,  # Short timeout per element
+                        default_return=None,
+                        operation_name="get href attribute"
+                    )
+                    if href:
+                        game_links.append(href)
+                
+                if game_links:
+                    return game_links
+                elif attempt < max_retries - 1:
+                    self.logger.warning(f"No valid hrefs found, retrying...")
+                    continue
+                else:
+                    self.logger.warning("No valid game links found after all retries")
+                    return []
+                    
+            except Exception as e:
+                error_str = str(e)
+                if "HTTPConnectionPool" in error_str or "Read timed out" in error_str:
+                    self.logger.error(f"Driver frozen during link extraction (attempt {attempt + 1}/{max_retries}): {e}")
+                    if attempt < max_retries - 1:
+                        # Recreate driver and retry
+                        try:
+                            SeleniumUtils._cleanup_driver_resources()
+                            SeleniumUtils.safe_quit_driver(self.driver)
+                        except Exception as e2:
+                            self.logger.warning(f"Error during cleanup: {e2}")
+                        
+                        time.sleep(5)
+                        
+                        try:
+                            self.driver = SeleniumUtils.create_driver(headless=True, max_retries=3)
+                            # Reload the scoreboard page if URL is available
+                            if scoreboard_url:
+                                SeleniumUtils.safe_driver_operation(
+                                    self.driver,
+                                    lambda url=scoreboard_url: self.driver.get(url),
+                                    timeout=90,
+                                    operation_name="reload scoreboard page"
+                                )
+                                time.sleep(2)
+                            else:
+                                # Try to get current URL as fallback
+                                current_url = SeleniumUtils.safe_driver_operation(
+                                    self.driver,
+                                    lambda: self.driver.current_url,
+                                    timeout=5,
+                                    default_return=None,
+                                    operation_name="get current URL"
+                                )
+                                if current_url:
+                                    SeleniumUtils.safe_driver_operation(
+                                        self.driver,
+                                        lambda url=current_url: self.driver.get(url),
+                                        timeout=90,
+                                        operation_name="reload scoreboard page"
+                                    )
+                                    time.sleep(2)
+                        except Exception as e2:
+                            self.logger.error(f"Failed to recreate driver: {e2}")
+                            if attempt == max_retries - 1:
+                                return []
+                            continue
+                    else:
+                        return []
+                else:
+                    error_msg = f"Error finding game links (attempt {attempt + 1}/{max_retries}): {e}"
+                    self.logger.error(error_msg)
+                    if attempt < max_retries - 1:
+                        continue
+                    self.send_notification(
+                        error_msg,
+                        ErrorType.ERROR
+                    )
+                    return []
+        
+        return []
     
     def _scrape_single_game(
         self, 

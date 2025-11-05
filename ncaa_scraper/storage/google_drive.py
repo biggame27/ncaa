@@ -337,7 +337,7 @@ class GoogleDriveManager:
     
     def create_folder_structure(self, year: str, month: str, gender: str, division: str, base_folder_id: Optional[str] = None) -> Optional[str]:
         """
-        Create the organized folder structure: scraped_data/year/month/gender/division
+        Create the organized folder structure: output_dir_name/year/month/gender/division
         
         Args:
             year: Year (e.g., "2025")
@@ -350,13 +350,16 @@ class GoogleDriveManager:
             Final folder ID (gender/division level) if successful, None if failed
         """
         try:
-            # Create scraped_data folder as the base
-            scraped_data_folder_id = self.find_or_create_folder("scraped_data", base_folder_id)
-            if not scraped_data_folder_id:
+            # Get base folder name from output_dir (e.g., "data" from "/app/data" or "scraped_data" from "scraped_data")
+            output_dir_name = os.path.basename(self.config.output_dir) or "scraped_data"
+            
+            # Create base folder using output_dir name
+            base_output_folder_id = self.find_or_create_folder(output_dir_name, base_folder_id)
+            if not base_output_folder_id:
                 return None
             
-            # Create year folder under scraped_data
-            year_folder_id = self.find_or_create_folder(year, scraped_data_folder_id)
+            # Create year folder under base output folder
+            year_folder_id = self.find_or_create_folder(year, base_output_folder_id)
             if not year_folder_id:
                 return None
             
