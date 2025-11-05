@@ -139,11 +139,13 @@ class SeleniumUtils:
                 
                 # Create service with WebDriverManager
                 try:
-                    # Try with regular Chrome first
-                    service = Service(ChromeDriverManager(cache_valid_range=1).install())
+                    # Remove invalid cache_valid_range argument - it's not supported in newer versions
+                    service = Service(ChromeDriverManager().install())
                 except Exception as e:
                     logger.warning(f"Failed to create ChromeDriver service: {e}")
-                    # Fallback: try without cache validation
+                    # Fallback: try again after cleanup
+                    SeleniumUtils._cleanup_driver_resources()
+                    time.sleep(2)
                     service = Service(ChromeDriverManager().install())
                 
                 # Create driver
@@ -201,13 +203,17 @@ class SeleniumUtils:
     def _cleanup_driver_resources():
         """Clean up driver-related resources and processes."""
         try:
-            # Kill any existing Chrome processes
+            # Kill any existing Chrome processes FIRST (before trying to quit driver)
             if os.name == 'nt':  # Windows
+                # More aggressive cleanup on Windows
                 os.system('taskkill /f /im chrome.exe 2>nul')
                 os.system('taskkill /f /im chromedriver.exe 2>nul')
+                # Wait a moment for processes to die
+                time.sleep(2)
             else:  # Unix-like systems
-                os.system('pkill -f chrome 2>/dev/null')
-                os.system('pkill -f chromedriver 2>/dev/null')
+                os.system('pkill -9 -f chrome 2>/dev/null')
+                os.system('pkill -9 -f chromedriver 2>/dev/null')
+                time.sleep(2)
             
             # Clean up temporary directories
             temp_dirs = ["/tmp/chrome-session", "chrome-session"]

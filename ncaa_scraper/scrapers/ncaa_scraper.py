@@ -133,19 +133,24 @@ class NCAAScraper(BaseScraper):
                         if idx > 0 and idx % 20 == 0:
                             self.logger.info(f"Recreating driver after {idx} games to prevent resource buildup...")
                             try:
+                                # Aggressive cleanup before recreating
+                                SeleniumUtils._cleanup_driver_resources()
                                 SeleniumUtils.safe_quit_driver(self.driver)
                             except Exception as e:
                                 self.logger.warning(f"Error quitting old driver: {e}")
+                            
+                            # Wait a bit for processes to fully terminate
+                            time.sleep(3)
                             
                             # Create new driver
                             try:
                                 self.driver = SeleniumUtils.create_driver(headless=True, max_retries=3)
                             except Exception as e:
                                 self.logger.error(f"Failed to recreate driver: {e}")
-                                # Try once more, then give up
+                                # Try once more with longer cleanup
+                                SeleniumUtils._cleanup_driver_resources()
+                                time.sleep(5)
                                 try:
-                                    SeleniumUtils._cleanup_driver_resources()
-                                    time.sleep(2)
                                     self.driver = SeleniumUtils.create_driver(headless=True, max_retries=3)
                                 except Exception as e2:
                                     self.logger.error(f"Failed to recreate driver after cleanup: {e2}")
@@ -462,7 +467,11 @@ class NCAAScraper(BaseScraper):
                 
                 if existing_game_data is not None and not existing_game_data.empty:
                     # Update the previous division's CSV to mark it as duplicate
-                    self.csv_handler.update_duplicate_flag(previous_csv_path, game_link, duplicate_value=True)
+                    if self.csv_handler.update_duplicate_flag(previous_csv_path, game_link, duplicate_value=True):
+                        # Upload updated CSV to Google Drive if enabled
+                        if self.config.upload_to_gdrive:
+                            self.logger.info(f"Uploading updated CSV with duplicate flag to Google Drive: {previous_csv_path}")
+                            self.upload_to_gdrive(previous_csv_path, year, month, gender, previous_division)
                     
                     # Copy the data to current division's CSV with duplicate flag set
                     existing_game_data = existing_game_data.copy()
@@ -536,12 +545,31 @@ class NCAAScraper(BaseScraper):
                 error_str = str(e)
                 if "HTTPConnectionPool" in error_str or "Read timed out" in error_str:
                     self.logger.error(f"Driver frozen/unresponsive during page load for {game_link}: {e}")
-                    # Recreate driver for next game
+                    # Aggressive cleanup and recreation
                     try:
+                        # Kill Chrome processes first before trying to quit driver
+                        SeleniumUtils._cleanup_driver_resources()
+                        # Then try to quit driver (might timeout, but try anyway)
                         SeleniumUtils.safe_quit_driver(self.driver)
+                    except Exception as e2:
+                        self.logger.warning(f"Error during cleanup: {e2}")
+                    
+                    # Wait before recreating to let processes fully die
+                    time.sleep(5)
+                    
+                    # Recreate driver
+                    try:
                         self.driver = SeleniumUtils.create_driver(headless=True, max_retries=3)
                     except Exception as e2:
                         self.logger.error(f"Failed to recreate driver: {e2}")
+                        # If this fails, we're in a bad state - wait longer and try once more
+                        SeleniumUtils._cleanup_driver_resources()
+                        time.sleep(10)
+                        try:
+                            self.driver = SeleniumUtils.create_driver(headless=True, max_retries=3)
+                        except Exception as e3:
+                            self.logger.error(f"Failed to recreate driver after extended wait: {e3}")
+                            return None  # Give up on this game
                     return None
                 else:
                     # Re-raise other exceptions
@@ -559,12 +587,25 @@ class NCAAScraper(BaseScraper):
                 error_str = str(e)
                 if "HTTPConnectionPool" in error_str or "Read timed out" in error_str:
                     self.logger.error(f"Driver frozen during element search for {game_link}: {e}")
-                    # Recreate driver
+                    # Aggressive cleanup and recreation
                     try:
+                        SeleniumUtils._cleanup_driver_resources()
                         SeleniumUtils.safe_quit_driver(self.driver)
+                    except Exception as e2:
+                        self.logger.warning(f"Error during cleanup: {e2}")
+                    
+                    time.sleep(5)
+                    
+                    try:
                         self.driver = SeleniumUtils.create_driver(headless=True, max_retries=3)
                     except Exception as e2:
                         self.logger.error(f"Failed to recreate driver: {e2}")
+                        SeleniumUtils._cleanup_driver_resources()
+                        time.sleep(10)
+                        try:
+                            self.driver = SeleniumUtils.create_driver(headless=True, max_retries=3)
+                        except Exception as e3:
+                            self.logger.error(f"Failed to recreate driver after extended wait: {e3}")
                     return None
                 else:
                     # Re-raise other exceptions (like TimeoutException from wait_for_element)
@@ -633,12 +674,25 @@ class NCAAScraper(BaseScraper):
             error_str = str(e)
             if "HTTPConnectionPool" in error_str or "Read timed out" in error_str:
                 self.logger.error(f"Driver frozen/unresponsive during game scrape for {game_link}: {e}")
-                # Recreate driver for next game
+                # Aggressive cleanup and recreation
                 try:
+                    SeleniumUtils._cleanup_driver_resources()
                     SeleniumUtils.safe_quit_driver(self.driver)
+                except Exception as e2:
+                    self.logger.warning(f"Error during cleanup: {e2}")
+                
+                time.sleep(5)
+                
+                try:
                     self.driver = SeleniumUtils.create_driver(headless=True, max_retries=3)
                 except Exception as e2:
                     self.logger.error(f"Failed to recreate driver: {e2}")
+                    SeleniumUtils._cleanup_driver_resources()
+                    time.sleep(10)
+                    try:
+                        self.driver = SeleniumUtils.create_driver(headless=True, max_retries=3)
+                    except Exception as e3:
+                        self.logger.error(f"Failed to recreate driver after extended wait: {e3}")
                 return None
             else:
                 # Other errors - log and notify
@@ -675,8 +729,32 @@ class NCAAScraper(BaseScraper):
                 self.logger.warning(f"Box score table not found")
                 return None
             
-            table = boxscore_table.find_element(By.TAG_NAME, 'table')
-            df = pd.read_html(StringIO(table.get_attribute('outerHTML')))[0]
+            # Wrap these in safe_driver_operation to prevent HTTPConnectionPool timeouts
+            table = SeleniumUtils.safe_driver_operation(
+                self.driver,
+                lambda: boxscore_table.find_element(By.TAG_NAME, 'table'),
+                timeout=20,  # Shorter timeout to fail fast
+                default_return=None,
+                operation_name=f"find table for {team_name}"
+            )
+            
+            if not table:
+                self.logger.warning(f"Table element not found for {team_name}")
+                return None
+            
+            outer_html = SeleniumUtils.safe_driver_operation(
+                self.driver,
+                lambda: table.get_attribute('outerHTML'),
+                timeout=20,  # Shorter timeout to fail fast
+                default_return=None,
+                operation_name=f"get outerHTML for {team_name}"
+            )
+            
+            if not outer_html:
+                self.logger.warning(f"Could not get outerHTML for {team_name}")
+                return None
+            
+            df = pd.read_html(StringIO(outer_html))[0]
             
             if df.empty:
                 self.logger.warning(f"Empty box score data for team {team_name}")
@@ -695,7 +773,11 @@ class NCAAScraper(BaseScraper):
             )
             
         except Exception as e:
-            self.logger.error(f"Error extracting team data for {team_name}: {e}")
+            error_str = str(e)
+            if "HTTPConnectionPool" in error_str or "Read timed out" in error_str:
+                self.logger.error(f"Driver frozen while extracting team data for {team_name}: {e}")
+            else:
+                self.logger.error(f"Error extracting team data for {team_name}: {e}")
             return None
     
     def _switch_to_second_team(self, team_selector, second_team_name: str) -> bool:
