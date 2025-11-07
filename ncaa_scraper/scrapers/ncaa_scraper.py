@@ -804,20 +804,54 @@ class NCAAScraper(BaseScraper):
             
             all_players = []
             
-            # Extract team names from the page (try to find them)
-            # We'll need to get team names from somewhere - for now, use placeholder
-            team1_name = "Team 1"
-            team2_name = "Team 2"
+            # Extract team names from card headers
+            team_names = []
+            for table in stat_tables:
+                # Find the parent card element
+                card = table.find_parent('div', class_='card')
+                if card:
+                    # Find the card header
+                    card_header = card.find('div', class_='card-header')
+                    if card_header:
+                        # Find the team name link in the header (look for link with target="TEAM_WIN" or href starting with /teams/)
+                        team_link = None
+                        # First try to find link with target="TEAM_WIN"
+                        team_link = card_header.find('a', {'target': 'TEAM_WIN'})
+                        if not team_link:
+                            # Fallback: find link with href starting with /teams/
+                            all_links = card_header.find_all('a', class_='skipMask')
+                            for link in all_links:
+                                href = link.get('href', '')
+                                if href and href.startswith('/teams/'):
+                                    team_link = link
+                                    break
+                        
+                        if team_link:
+                            team_name = team_link.get_text(strip=True)
+                            team_names.append(team_name)
+                        else:
+                            # Fallback: try to find any text in the header (excluding "Period Stats")
+                            header_text = card_header.get_text(strip=True)
+                            # Remove "Period Stats" if present
+                            if 'Period Stats' in header_text:
+                                header_text = header_text.replace('Period Stats', '').strip()
+                            if header_text:
+                                team_names.append(header_text)
+                            else:
+                                team_names.append(None)
+                    else:
+                        team_names.append(None)
+                else:
+                    team_names.append(None)
             
-            # Try to find team names from page structure
-            try:
-                # Look for team names in the page - this might need adjustment based on actual HTML structure
-                team_elements = soup.find_all(['h2', 'h3', 'div'], class_=re.compile(r'team|competitor'))
-                if len(team_elements) >= 2:
-                    team1_name = team_elements[0].get_text(strip=True)
-                    team2_name = team_elements[1].get_text(strip=True)
-            except:
-                pass
+            # Ensure we have two team names
+            if len(team_names) < 2 or team_names[0] is None or team_names[1] is None:
+                self.logger.warning(f"Could not extract team names properly for {game_link}, using fallback")
+                team1_name = "Team 1"
+                team2_name = "Team 2"
+            else:
+                team1_name = team_names[0]
+                team2_name = team_names[1]
             
             for table_idx, table in enumerate(stat_tables):
                 team_name = team1_name if table_idx == 0 else team2_name
