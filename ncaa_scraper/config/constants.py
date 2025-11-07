@@ -29,7 +29,8 @@ class Gender(Enum):
 GOOGLE_DRIVE_SCOPES = ['https://www.googleapis.com/auth/drive.file']
 
 # NCAA URL patterns
-NCAA_BASE_URL = "https://www.ncaa.com/scoreboard/basketball-{gender}/{division}/{date}/all-conf"
+NCAA_BASE_URL = "https://stats.ncaa.org/contests/livestream_scoreboards"
+NCAA_OLD_BASE_URL = "https://www.ncaa.com/scoreboard/basketball-{gender}/{division}/{date}/all-conf"  # Legacy
 
 # Default values
 DEFAULT_OUTPUT_DIR = "scraped_data"

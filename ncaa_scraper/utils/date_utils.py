@@ -16,6 +16,10 @@ def format_date_for_url(target_date: date) -> str:
     """Format date for use in NCAA URLs (YYYY/MM/DD)."""
     return target_date.strftime('%Y/%m/%d')
 
+def format_date_for_stats_ncaa_url(target_date: date) -> str:
+    """Format date for stats.ncaa.org URLs (MM/DD/YYYY)."""
+    return target_date.strftime('%m/%d/%Y')
+
 
 def parse_date_from_url(url: str) -> date:
     """Parse date from NCAA URL."""

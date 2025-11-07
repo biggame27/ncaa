@@ -4,7 +4,12 @@ A modular, well-structured scraper for NCAA basketball box scores with Google Dr
 
 ## 🏀 What This Project Does
 
-This scraper automatically collects NCAA basketball box score data from the official NCAA website and organizes it for analysis. It's designed to be reliable, efficient, and easy to use.
+This scraper automatically collects NCAA basketball box score data from [stats.ncaa.org](https://stats.ncaa.org) and organizes it for analysis. It's designed to be reliable, efficient, and easy to use.
+
+### Data Source
+- **Source**: [stats.ncaa.org](https://stats.ncaa.org) - Official NCAA statistics website
+- **Data Type**: Individual player statistics from game box scores
+- **Format**: CSV files with detailed player performance metrics
 
 ### Key Features
 - 🏀 Scrapes NCAA basketball box scores (Men's & Women's, D1/D2/D3)
@@ -65,6 +70,18 @@ ncaa_scraper/
 3. **Type Safety** - Type hints throughout for better IDE support and debugging
 4. **Configuration Management** - Centralized config with environment variable support
 5. **Extensibility** - Base classes for easy extension and plugin-like architecture
+6. **Modern Data Source** - Uses stats.ncaa.org for more reliable scraping with lighter HTML and better performance
+7. **Bot Protection Handling** - Uses undetected_chromedriver to handle Akamai bot protection
+
+### How It Works
+
+The scraper:
+1. Generates scoreboard URLs for stats.ncaa.org based on date, division, and gender
+2. Navigates to the scoreboard page and extracts game contest IDs
+3. For each game, visits the individual stats page (`/contests/{contest_id}/individual_stats`)
+4. Parses player statistics from HTML tables using BeautifulSoup
+5. Exports data to CSV files with organized folder structure
+6. Optionally uploads to Google Drive with duplicate detection
 
 ## ⚙️ Configuration & Setup
 
@@ -236,10 +253,11 @@ for url in urls:
 
 #### General Issues
 3. **Import Errors**: Make sure you're in the project root directory
-4. **Selenium Issues**: Ensure Chrome browser is installed (or use Docker)
+4. **Selenium Issues**: Ensure Chrome browser is installed (or use Docker). The scraper uses `undetected_chromedriver` to bypass bot protection on stats.ncaa.org
 5. **Google Drive Auth**: Run `python migrate_credentials.py` to set up credentials
 6. **Permission Errors**: Check file/directory permissions
 7. **Rate Limiting**: Wait 15-30 minutes between runs, or use `--divisions` and `--genders` to reduce requests
+8. **Access Denied Errors**: If you see "Access Denied" from stats.ncaa.org, ensure `undetected_chromedriver` is properly installed and Chrome is up to date
 
 ### Debug Mode
 ```bash

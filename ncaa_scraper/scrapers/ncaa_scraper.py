@@ -10,6 +10,8 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException, WebDriverException
 from io import StringIO
 import pandas as pd
+from bs4 import BeautifulSoup
+import re
 
 from .base_scraper import BaseScraper
 from .selenium_utils import SeleniumUtils
@@ -203,6 +205,19 @@ class NCAAScraper(BaseScraper):
         try:
             self.logger.info(f"Loading scoreboard page: {url}")
             
+            # Visit main page first to establish session (for stats.ncaa.org)
+            try:
+                self.logger.info("Visiting stats.ncaa.org to establish session...")
+                SeleniumUtils.safe_driver_operation(
+                    self.driver,
+                    lambda: self.driver.get("https://stats.ncaa.org"),
+                    timeout=30,
+                    operation_name="visit stats.ncaa.org main page"
+                )
+                time.sleep(3)  # Let cookies/session establish
+            except Exception as e:
+                self.logger.warning(f"Could not visit main page first: {e}, continuing anyway...")
+            
             # Add human-like delay before loading
             SeleniumUtils.human_like_delay(1.0, 2.0)
             
@@ -311,19 +326,53 @@ class NCAAScraper(BaseScraper):
             # Add another delay after page load to ensure stability
             SeleniumUtils.human_like_delay(2.0, 4.0)
             
-            # Verify driver is responsive before proceeding
+            # Verify driver is responsive before proceeding with a more robust health check
             try:
+                # Try a simple operation to verify driver health
                 test_result = SeleniumUtils.safe_driver_operation(
                     self.driver,
-                    lambda: self.driver.current_url,
+                    lambda: len(self.driver.find_elements(By.TAG_NAME, "body")),
                     timeout=5,
-                    default_return=None,
-                    operation_name="verify driver responsive"
+                    default_return=0,
+                    operation_name="driver health check"
                 )
-                if test_result is None:
-                    self.logger.warning("Driver not responsive after page load, may need recovery")
+                if test_result == 0:
+                    self.logger.warning("Driver health check failed (no body elements found), recreating driver...")
+                    try:
+                        SeleniumUtils.safe_quit_driver(self.driver)
+                        self.driver = SeleniumUtils.create_driver(headless=True, max_retries=3)
+                        # Reload page
+                        load_success = SeleniumUtils.safe_driver_operation(
+                            self.driver,
+                            lambda: self.driver.get(url),
+                            timeout=90,
+                            operation_name="reload after driver recreation"
+                        )
+                        if load_success is None:
+                            self.logger.error(f"Failed to reload page after driver recreation: {url}")
+                            return False
+                        time.sleep(3)
+                    except Exception as e2:
+                        self.logger.error(f"Failed to recreate driver during health check: {e2}")
+                        return False
             except Exception as e:
-                self.logger.warning(f"Driver health check failed: {e}")
+                self.logger.warning(f"Driver health check error: {e}, attempting driver recreation...")
+                try:
+                    SeleniumUtils.safe_quit_driver(self.driver)
+                    self.driver = SeleniumUtils.create_driver(headless=True, max_retries=3)
+                    load_success = SeleniumUtils.safe_driver_operation(
+                        self.driver,
+                        lambda: self.driver.get(url),
+                        timeout=90,
+                        operation_name="reload after driver recreation"
+                    )
+                    if load_success is None:
+                        self.logger.error(f"Failed to reload page after driver recreation: {url}")
+                        return False
+                    time.sleep(3)
+                except Exception as e2:
+                    self.logger.error(f"Failed to recreate driver during health check: {e2}")
+                    return False
             
             # Wait for page to load
             wait = WebDriverWait(self.driver, self.config.wait_timeout)
@@ -347,13 +396,20 @@ class NCAAScraper(BaseScraper):
                 pass
             
             try:
-                wait.until(EC.presence_of_element_located((By.CLASS_NAME, "gamePod-link")))
+                # Wait for body to be present (stats.ncaa.org structure)
+                wait.until(EC.presence_of_element_located((By.TAG_NAME, "body")))
+                time.sleep(2)  # Additional wait for content to load
                 return True
             except TimeoutException:
-                # Double-check for explicit no-games message before treating as error
+                # Check if page loaded but just has no games
                 try:
-                    no_games = self.driver.find_elements(By.CLASS_NAME, "no-games-message")
-                    if no_games:
+                    html = self.driver.page_source
+                    soup = BeautifulSoup(html, 'html.parser')
+                    rows = soup.find_all('div', class_='row')
+                    cards = []
+                    for row in rows:
+                        cards.extend(row.find_all('div', class_='card'))
+                    if not cards:
                         no_games_msg = f"No games found on scoreboard page: {url}"
                         self.logger.info(no_games_msg)
                         self.send_notification(
@@ -428,7 +484,7 @@ class NCAAScraper(BaseScraper):
             return False
     
     def _extract_game_links(self, scoreboard_url: Optional[str] = None) -> List[str]:
-        """Extract game links from the scoreboard page with retry logic."""
+        """Extract game links from the scoreboard page using BeautifulSoup."""
         max_retries = 3
         
         for attempt in range(max_retries):
@@ -437,44 +493,105 @@ class NCAAScraper(BaseScraper):
                     delay = 2 * (attempt)  # 2s, 4s delays
                     self.logger.info(f"Retrying game link extraction (attempt {attempt + 1}/{max_retries}) after {delay}s delay")
                     time.sleep(delay)
+                    
+                    # If retrying, reload the page to ensure fresh state
+                    if scoreboard_url:
+                        self.logger.info("Reloading scoreboard page before retry...")
+                        try:
+                            # Visit main page first
+                            SeleniumUtils.safe_driver_operation(
+                                self.driver,
+                                lambda: self.driver.get("https://stats.ncaa.org"),
+                                timeout=30,
+                                operation_name="visit stats.ncaa.org before retry"
+                            )
+                            time.sleep(2)
+                            SeleniumUtils.safe_driver_operation(
+                                self.driver,
+                                lambda url=scoreboard_url: self.driver.get(url),
+                                timeout=90,
+                                operation_name="reload scoreboard page for retry"
+                            )
+                            time.sleep(3)
+                        except Exception as e:
+                            self.logger.warning(f"Error reloading page for retry: {e}")
                 
-                # Wrap find_elements in safe_driver_operation to prevent timeouts
-                box_scores = SeleniumUtils.safe_driver_operation(
+                # Wait for page to be ready
+                try:
+                    wait = WebDriverWait(self.driver, self.config.wait_timeout)
+                    wait.until(EC.presence_of_element_located((By.TAG_NAME, "body")))
+                    time.sleep(2)  # Additional wait for content
+                except TimeoutException:
+                    if attempt < max_retries - 1:
+                        self.logger.warning(f"Page not ready, retrying...")
+                        continue
+                    self.logger.warning("Page not ready after all retries")
+                    return []
+                
+                # Get page source and parse with BeautifulSoup
+                html = SeleniumUtils.safe_driver_operation(
                     self.driver,
-                    lambda: self.driver.find_elements(By.CLASS_NAME, "gamePod-link"),
-                    timeout=30,  # Shorter timeout to fail fast
-                    default_return=[],
-                    operation_name="find game links"
+                    lambda: self.driver.page_source,
+                    timeout=30,
+                    default_return="",
+                    operation_name="get page source for parsing"
                 )
                 
-                if not box_scores:
+                if not html:
+                    if attempt < max_retries - 1:
+                        continue
+                    return []
+                
+                # Parse with BeautifulSoup (like altscraper.py)
+                soup = BeautifulSoup(html, 'html.parser')
+                game_links = []
+                seen_contest_ids = set()  # Track contest IDs to avoid duplicates
+                
+                # Find all rows
+                rows = soup.find_all('div', class_='row')
+                
+                for row in rows:
+                    # Find all cards in this row (each card is a game)
+                    cards = row.find_all('div', class_='card')
+                    
+                    for card in cards:
+                        try:
+                            # Find the table
+                            table = card.find('table')
+                            if not table:
+                                continue
+                            
+                            # Find box score link
+                            box_score_link_elem = table.find('a', href=re.compile(r'/contests/\d+/box_score'))
+                            if box_score_link_elem:
+                                box_score_path = box_score_link_elem.get('href', '')
+                                # Convert to individual_stats URL
+                                contest_id_match = re.search(r'/contests/(\d+)/', box_score_path)
+                                if contest_id_match:
+                                    contest_id = contest_id_match.group(1)
+                                    # Only add if we haven't seen this contest ID before
+                                    if contest_id not in seen_contest_ids:
+                                        seen_contest_ids.add(contest_id)
+                                        game_link = f"https://stats.ncaa.org/contests/{contest_id}/individual_stats"
+                                        game_links.append(game_link)
+                        except Exception as e:
+                            self.logger.warning(f"Error parsing game card: {e}")
+                            continue
+                
+                if not game_links:
                     if attempt < max_retries - 1:
                         self.logger.warning(f"No game links found, retrying...")
                         continue
                     self.logger.warning("No game links found after all retries")
                     return []
                 
-                # Extract hrefs with timeout protection
-                game_links = []
-                for box_score in box_scores:
-                    href = SeleniumUtils.safe_driver_operation(
-                        self.driver,
-                        lambda bs=box_score: bs.get_attribute('href'),
-                        timeout=10,  # Short timeout per element
-                        default_return=None,
-                        operation_name="get href attribute"
-                    )
-                    if href:
-                        game_links.append(href)
+                # Additional deduplication check (in case of any edge cases)
+                unique_links = list(dict.fromkeys(game_links))  # Preserves order while removing duplicates
+                if len(unique_links) < len(game_links):
+                    self.logger.info(f"Removed {len(game_links) - len(unique_links)} duplicate game links")
                 
-                if game_links:
-                    return game_links
-                elif attempt < max_retries - 1:
-                    self.logger.warning(f"No valid hrefs found, retrying...")
-                    continue
-                else:
-                    self.logger.warning("No valid game links found after all retries")
-                    return []
+                self.logger.info(f"Found {len(unique_links)} unique game links")
+                return unique_links
                     
             except Exception as e:
                 error_str = str(e)
@@ -492,8 +609,15 @@ class NCAAScraper(BaseScraper):
                         
                         try:
                             self.driver = SeleniumUtils.create_driver(headless=True, max_retries=3)
-                            # Reload the scoreboard page if URL is available
+                            # Visit main page first, then reload scoreboard
                             if scoreboard_url:
+                                SeleniumUtils.safe_driver_operation(
+                                    self.driver,
+                                    lambda: self.driver.get("https://stats.ncaa.org"),
+                                    timeout=30,
+                                    operation_name="visit stats.ncaa.org before retry"
+                                )
+                                time.sleep(2)
                                 SeleniumUtils.safe_driver_operation(
                                     self.driver,
                                     lambda url=scoreboard_url: self.driver.get(url),
@@ -501,40 +625,20 @@ class NCAAScraper(BaseScraper):
                                     operation_name="reload scoreboard page"
                                 )
                                 time.sleep(2)
-                            else:
-                                # Try to get current URL as fallback
-                                current_url = SeleniumUtils.safe_driver_operation(
-                                    self.driver,
-                                    lambda: self.driver.current_url,
-                                    timeout=5,
-                                    default_return=None,
-                                    operation_name="get current URL"
-                                )
-                                if current_url:
-                                    SeleniumUtils.safe_driver_operation(
-                                        self.driver,
-                                        lambda url=current_url: self.driver.get(url),
-                                        timeout=90,
-                                        operation_name="reload scoreboard page"
-                                    )
-                                    time.sleep(2)
                         except Exception as e2:
                             self.logger.error(f"Failed to recreate driver: {e2}")
-                            if attempt == max_retries - 1:
-                                return []
-                            continue
+                            if attempt < max_retries - 1:
+                                continue
                     else:
+                        self.logger.error(f"Failed to extract game links after all retries: {e}")
                         return []
                 else:
-                    error_msg = f"Error finding game links (attempt {attempt + 1}/{max_retries}): {e}"
-                    self.logger.error(error_msg)
                     if attempt < max_retries - 1:
+                        self.logger.warning(f"Error extracting game links (attempt {attempt + 1}/{max_retries}): {e}")
                         continue
-                    self.send_notification(
-                        error_msg,
-                        ErrorType.ERROR
-                    )
-                    return []
+                    else:
+                        self.logger.error(f"Failed to extract game links after all retries: {e}")
+                        return []
         
         return []
     
@@ -548,7 +652,7 @@ class NCAAScraper(BaseScraper):
         division: str,
         csv_path: str
     ) -> Optional[GameData]:
-        """Scrape a single game's box score data."""
+        """Scrape a single game's individual stats data."""
         game_id = extract_game_id_from_url(game_link)
         
         # Check if game already exists in CSV
@@ -606,19 +710,17 @@ class NCAAScraper(BaseScraper):
         self.logger.info(f"Scraping: {game_link}")
         
         try:
-            # Navigate to game page with timeout handling and protection against read timeouts
+            # Navigate to individual stats page with timeout handling
             try:
-                # Use safe_driver_operation to prevent read timeout errors
                 load_success = SeleniumUtils.safe_driver_operation(
                     self.driver,
                     lambda: self.driver.get(game_link),
-                    timeout=90,  # 90 seconds max (longer than page_load_timeout of 60s)
-                    operation_name=f"load game page {game_link}"
+                    timeout=90,
+                    operation_name=f"load individual stats page {game_link}"
                 )
                 
                 if load_success is None:
-                    # Page load hung - force stop and wait for page to stabilize
-                    self.logger.warning(f"Page load hung for game {game_link}, stopping and waiting for stabilization...")
+                    self.logger.warning(f"Page load hung for game {game_link}, attempting recovery...")
                     try:
                         SeleniumUtils.safe_driver_operation(
                             self.driver,
@@ -626,45 +728,16 @@ class NCAAScraper(BaseScraper):
                             timeout=5,
                             operation_name="stop page load"
                         )
-                        # Wait longer for page to stabilize after stopping
                         time.sleep(3)
-                        
-                        # Check if page is in a usable state
-                        try:
-                            wait = WebDriverWait(self.driver, 5)
-                            wait.until(EC.presence_of_element_located((By.TAG_NAME, "body")))
-                            # Wait a bit more for JavaScript to finish initializing
-                            time.sleep(2)
-                            self.logger.info(f"Page stabilized after stop, proceeding...")
-                        except TimeoutException:
-                            self.logger.warning(f"Page not stable after stop, will retry page load...")
-                            # Reload the page once
-                            try:
-                                reload_success = SeleniumUtils.safe_driver_operation(
-                                    self.driver,
-                                    lambda: self.driver.get(game_link),
-                                    timeout=90,
-                                    operation_name=f"reload game page after hung load {game_link}"
-                                )
-                                if reload_success is not None:
-                                    time.sleep(3)  # Wait for reload
-                                    self.logger.info(f"Successfully reloaded page after hung load")
-                                else:
-                                    self.logger.warning(f"Page reload also hung, will try to proceed anyway")
-                                    time.sleep(3)
-                            except Exception as reload_error:
-                                self.logger.warning(f"Error reloading page: {reload_error}, will try to proceed anyway")
                     except Exception:
-                        # Driver stuck, skip this game
                         self.logger.error(f"Driver unresponsive for {game_link}, skipping...")
                         return None
                 else:
                     self.logger.info(f"Successfully navigated to: {game_link}")
-                    # Give page time to fully initialize even on successful load
                     time.sleep(2)
                     
             except TimeoutException:
-                self.logger.warning(f"Page load timeout for game {game_link}, stopping and waiting for stabilization...")
+                self.logger.warning(f"Page load timeout for game {game_link}, attempting recovery...")
                 try:
                     SeleniumUtils.safe_driver_operation(
                         self.driver,
@@ -672,177 +745,200 @@ class NCAAScraper(BaseScraper):
                         timeout=5,
                         operation_name="stop page load"
                     )
-                    # Wait longer for page to stabilize after stopping
                     time.sleep(3)
-                    
-                    # Check if page is in a usable state
-                    try:
-                        wait = WebDriverWait(self.driver, 5)
-                        wait.until(EC.presence_of_element_located((By.TAG_NAME, "body")))
-                        time.sleep(2)  # Additional wait for JavaScript initialization
-                        self.logger.info(f"Page stabilized after timeout stop, proceeding...")
-                    except TimeoutException:
-                        self.logger.warning(f"Page not stable after timeout stop, will try to proceed anyway")
-                        time.sleep(2)
                 except Exception:
-                    # Driver stuck, skip this game
                     self.logger.error(f"Driver unresponsive for {game_link}, skipping...")
                     return None
             except Exception as e:
-                # Catch ANY exception during get() - driver might be frozen
                 error_str = str(e)
                 if "HTTPConnectionPool" in error_str or "Read timed out" in error_str:
                     self.logger.error(f"Driver frozen/unresponsive during page load for {game_link}: {e}")
-                    # Aggressive cleanup and recreation
                     try:
-                        # Kill Chrome processes first before trying to quit driver
                         SeleniumUtils._cleanup_driver_resources()
-                        # Then try to quit driver (might timeout, but try anyway)
                         SeleniumUtils.safe_quit_driver(self.driver)
                     except Exception as e2:
                         self.logger.warning(f"Error during cleanup: {e2}")
                     
-                    # Wait before recreating to let processes fully die
                     time.sleep(5)
                     
-                    # Recreate driver
                     try:
                         self.driver = SeleniumUtils.create_driver(headless=True, max_retries=3)
                     except Exception as e2:
                         self.logger.error(f"Failed to recreate driver: {e2}")
-                        # If this fails, we're in a bad state - wait longer and try once more
-                        SeleniumUtils._cleanup_driver_resources()
-                        time.sleep(10)
-                        try:
-                            self.driver = SeleniumUtils.create_driver(headless=True, max_retries=3)
-                        except Exception as e3:
-                            self.logger.error(f"Failed to recreate driver after extended wait: {e3}")
-                            return None  # Give up on this game
+                        return None
                     return None
                 else:
-                    # Re-raise other exceptions
                     raise
             
-            # Wait for page to be ready before looking for elements
+            # Wait for page to be ready
             wait = WebDriverWait(self.driver, self.config.wait_timeout)
             
-            # Wait for basic page structure to be ready
             try:
                 wait.until(EC.presence_of_element_located((By.TAG_NAME, "body")))
-                time.sleep(1)  # Additional stabilization
+                time.sleep(1)
             except TimeoutException:
                 self.logger.warning(f"Page body not found, page may not be loaded properly")
             
-            # Check for team selector with retry logic (especially important after hung page loads)
-            team_selector = None
-            max_selector_retries = 3
+            # Get page source and parse with BeautifulSoup
+            html = SeleniumUtils.safe_driver_operation(
+                self.driver,
+                lambda: self.driver.page_source,
+                timeout=30,
+                default_return="",
+                operation_name="get page source for parsing"
+            )
             
-            for selector_attempt in range(max_selector_retries):
-                try:
-                    if selector_attempt > 0:
-                        self.logger.info(f"Retrying to find team selector (attempt {selector_attempt + 1}/{max_selector_retries}) for {game_link}")
-                        time.sleep(2)  # Wait between retries
+            if not html:
+                self.logger.warning(f"Could not get page source for {game_link}")
+                return None
+            
+            # Parse individual stats using BeautifulSoup (like altscraper.py)
+            soup = BeautifulSoup(html, 'html.parser')
+            
+            # Find all stat tables (one for each team)
+            stat_tables = soup.find_all('table', id=re.compile(r'competitor_\d+_year_stat_category_0_data_table'))
+            
+            if len(stat_tables) < 2:
+                self.logger.warning(f"Could not find both team stat tables for {game_link}")
+                return None
+            
+            all_players = []
+            
+            # Extract team names from the page (try to find them)
+            # We'll need to get team names from somewhere - for now, use placeholder
+            team1_name = "Team 1"
+            team2_name = "Team 2"
+            
+            # Try to find team names from page structure
+            try:
+                # Look for team names in the page - this might need adjustment based on actual HTML structure
+                team_elements = soup.find_all(['h2', 'h3', 'div'], class_=re.compile(r'team|competitor'))
+                if len(team_elements) >= 2:
+                    team1_name = team_elements[0].get_text(strip=True)
+                    team2_name = team_elements[1].get_text(strip=True)
+            except:
+                pass
+            
+            for table_idx, table in enumerate(stat_tables):
+                team_name = team1_name if table_idx == 0 else team2_name
+                opponent_name = team2_name if table_idx == 0 else team1_name
+                
+                # Find all player rows
+                tbody = table.find('tbody')
+                if not tbody:
+                    continue
                     
-                    team_selector = SeleniumUtils.wait_for_element(
-                        self.driver, By.CLASS_NAME, "boxscore-team-selector", 
-                        self.config.wait_timeout + (5 * selector_attempt)  # Longer timeout on retries
-                    )
-                    
-                    # If found, verify it's actually usable
-                    if team_selector:
-                        try:
-                            # Verify it has content
-                            child_divs = SeleniumUtils.safe_driver_operation(
-                                self.driver,
-                                lambda: team_selector.find_elements(By.TAG_NAME, "div"),
-                                timeout=10,
-                                default_return=[],
-                                operation_name="verify team selector has content"
-                            )
-                            if child_divs and len(child_divs) >= 2:
-                                self.logger.info(f"Successfully found team selector with {len(child_divs)} teams")
-                                break  # Success, exit retry loop
-                            else:
-                                self.logger.warning(f"Team selector found but has insufficient teams ({len(child_divs) if child_divs else 0}), retrying...")
-                                team_selector = None
-                                if selector_attempt < max_selector_retries - 1:
-                                    continue
-                        except Exception as verify_error:
-                            self.logger.warning(f"Error verifying team selector: {verify_error}, retrying...")
-                            team_selector = None
-                            if selector_attempt < max_selector_retries - 1:
-                                continue
-                    else:
-                        if selector_attempt < max_selector_retries - 1:
+                player_rows = tbody.find_all('tr', id=re.compile(r'game_player_\d+_year_stat_category_0'))
+                
+                # Skip the last row (usually team totals/team name row)
+                if len(player_rows) > 0:
+                    player_rows = player_rows[:-1]
+                
+                for row in player_rows:
+                    try:
+                        # Skip team totals rows
+                        if 'TEAM' in row.get_text() or team_name.strip() in row.get_text():
                             continue
-                            
-                except Exception as e:
-                    error_str = str(e)
-                    if "HTTPConnectionPool" in error_str or "Read timed out" in error_str:
-                        self.logger.error(f"Driver frozen during element search for {game_link} (attempt {selector_attempt + 1}/{max_selector_retries}): {e}")
-                        if selector_attempt < max_selector_retries - 1:
-                            # Try to recover driver before retrying
-                            try:
-                                SeleniumUtils._cleanup_driver_resources()
-                                SeleniumUtils.safe_quit_driver(self.driver)
-                                time.sleep(5)
-                                self.driver = SeleniumUtils.create_driver(headless=True, max_retries=3)
-                                # Reload the page
-                                SeleniumUtils.safe_driver_operation(
-                                    self.driver,
-                                    lambda: self.driver.get(game_link),
-                                    timeout=90,
-                                    operation_name=f"reload game page after driver recovery {game_link}"
-                                )
-                                time.sleep(3)
-                                continue  # Retry finding selector
-                            except Exception as e2:
-                                self.logger.error(f"Failed to recover driver: {e2}")
-                                return None
-                        else:
-                            # Final attempt failed
-                            return None
-                    else:
-                        # Other exceptions - retry if attempts remain
-                        if selector_attempt < max_selector_retries - 1:
-                            self.logger.warning(f"Error finding team selector (attempt {selector_attempt + 1}/{max_selector_retries}): {e}")
+                        
+                        cells = row.find_all('td')
+                        if len(cells) < 20:
                             continue
-                        else:
-                            # Final attempt failed
-                            raise
+                        
+                        # Extract player data (same as altscraper.py)
+                        player_num = cells[0].get_text(strip=True) if len(cells) > 0 else ''
+                        
+                        name_elem = cells[1].find('a')
+                        player_name = name_elem.get_text(strip=True) if name_elem else cells[1].get_text(strip=True)
+                        
+                        position = cells[2].get_text(strip=True) if len(cells) > 2 else ''
+                        
+                        # Convert minutes from "MM:SS" to decimal
+                        min_text = cells[3].get_text(strip=True) if len(cells) > 3 else '0:00'
+                        minutes = self._convert_minutes_to_decimal(min_text)
+                        
+                        fgm = cells[4].get_text(strip=True) if len(cells) > 4 else '0'
+                        fga = cells[5].get_text(strip=True) if len(cells) > 5 else '0'
+                        fgm_a = f"{fgm}-{fga}"
+                        
+                        fg3m = cells[6].get_text(strip=True) if len(cells) > 6 else '0'
+                        fg3a = cells[7].get_text(strip=True) if len(cells) > 7 else '0'
+                        fg3m_a = f"{fg3m}-{fg3a}"
+                        
+                        ftm = cells[8].get_text(strip=True) if len(cells) > 8 else '0'
+                        fta = cells[9].get_text(strip=True) if len(cells) > 9 else '0'
+                        ftm_a = f"{ftm}-{fta}"
+                        
+                        pts = cells[10].get_text(strip=True) if len(cells) > 10 else '0'
+                        oreb = cells[11].get_text(strip=True) if len(cells) > 11 else '0'
+                        dreb = cells[12].get_text(strip=True) if len(cells) > 12 else '0'
+                        reb = cells[13].get_text(strip=True) if len(cells) > 13 else '0'
+                        ast = cells[14].get_text(strip=True) if len(cells) > 14 else '0'
+                        to = cells[15].get_text(strip=True) if len(cells) > 15 else '0'
+                        stl = cells[16].get_text(strip=True) if len(cells) > 16 else '0'
+                        blk = cells[17].get_text(strip=True) if len(cells) > 17 else '0'
+                        pf = cells[18].get_text(strip=True) if len(cells) > 18 else '0'
+                        
+                        # Create player record as DataFrame row
+                        player_dict = {
+                            'NO': player_num,
+                            'Name': player_name,
+                            'POS': position,
+                            'MIN': minutes,
+                            'FGM-A': fgm_a,
+                            '3PM-A': fg3m_a,
+                            'FTM-A': ftm_a,
+                            'OREB': oreb,
+                            'REB': reb,
+                            'AST': ast,
+                            'ST': stl,
+                            'BLK': blk,
+                            'TO': to,
+                            'PF': pf,
+                            'PTS': pts,
+                            'Unnamed: 15': '',
+                            'TEAM': team_name,
+                            'OPP': opponent_name,
+                            'GAMEID': game_id,
+                            'GAMELINK': game_link,
+                        }
+                        
+                        all_players.append(player_dict)
+                        
+                    except Exception as e:
+                        self.logger.warning(f"Error parsing player row: {e}")
+                        continue
             
-            if not team_selector:
-                error_msg = f"Box score page may not exist or is not available for {game_link}"
-                self.logger.warning(error_msg)
-                self.send_notification(
-                    error_msg,
-                    ErrorType.WARNING,
-                    division=division,
-                    date=f"{year}-{month}-{day}",
-                    gender=gender,
-                    game_link=game_link
-                )
+            if not all_players:
+                self.logger.warning(f"No player data found for {game_link}")
                 return None
             
-            # Get team names
-            team_names = self._extract_team_names(team_selector)
-            if len(team_names) < 2:
-                self.logger.warning(f"Not enough team names found for {game_link}")
+            # Convert to DataFrame
+            df = pd.DataFrame(all_players)
+            
+            # Split into two teams
+            team1_df = df[df['TEAM'] == team1_name].copy()
+            team2_df = df[df['TEAM'] == team2_name].copy()
+            
+            if team1_df.empty or team2_df.empty:
+                self.logger.warning(f"Could not split teams properly for {game_link}")
                 return None
             
-            # Get team data
-            team_one_data = self._extract_team_data(team_selector, team_names[0], team_names[1], game_id, game_link)
-            if not team_one_data:
-                return None
+            # Create TeamData objects
+            team_one_data = TeamData(
+                team_name=team1_name,
+                opponent_name=team2_name,
+                game_id=game_id,
+                game_link=game_link,
+                stats=team1_df[['NO', 'Name', 'POS', 'MIN', 'FGM-A', '3PM-A', 'FTM-A', 'OREB', 'REB', 'AST', 'ST', 'BLK', 'TO', 'PF', 'PTS', 'Unnamed: 15']]
+            )
             
-            # Switch to second team
-            if not self._switch_to_second_team(team_selector, team_names[1]):
-                return None
-            
-            # Get second team data
-            team_two_data = self._extract_team_data(team_selector, team_names[1], team_names[0], game_id, game_link)
-            if not team_two_data:
-                return None
+            team_two_data = TeamData(
+                team_name=team2_name,
+                opponent_name=team1_name,
+                game_id=game_id,
+                game_link=game_link,
+                stats=team2_df[['NO', 'Name', 'POS', 'MIN', 'FGM-A', '3PM-A', 'FTM-A', 'OREB', 'REB', 'AST', 'ST', 'BLK', 'TO', 'PF', 'PTS', 'Unnamed: 15']]
+            )
             
             # Check if this is a cross-division duplicate
             is_cross_division_duplicate = (
@@ -871,11 +967,9 @@ class NCAAScraper(BaseScraper):
                 return None
                 
         except Exception as e:
-            # Check if this is a frozen driver error
             error_str = str(e)
             if "HTTPConnectionPool" in error_str or "Read timed out" in error_str:
                 self.logger.error(f"Driver frozen/unresponsive during game scrape for {game_link}: {e}")
-                # Aggressive cleanup and recreation
                 try:
                     SeleniumUtils._cleanup_driver_resources()
                     SeleniumUtils.safe_quit_driver(self.driver)
@@ -896,7 +990,6 @@ class NCAAScraper(BaseScraper):
                         self.logger.error(f"Failed to recreate driver after extended wait: {e3}")
                 return None
             else:
-                # Other errors - log and notify
                 error_msg = f"Error scraping game {game_link}: {e}"
                 self.logger.error(error_msg)
                 self.send_notification(
@@ -909,6 +1002,20 @@ class NCAAScraper(BaseScraper):
                 )
                 return None
     
+    def _convert_minutes_to_decimal(self, min_text: str) -> float:
+        """Convert minutes from 'MM:SS' format to decimal (e.g., '31:36' -> 31.6)."""
+        try:
+            if ':' in min_text:
+                parts = min_text.split(':')
+                minutes = int(parts[0])
+                seconds = int(parts[1])
+                decimal = round(minutes + (seconds / 60), 1)
+                return decimal
+            else:
+                return float(min_text)
+        except:
+            return 0.0
+    
     def _extract_team_names(self, team_selector) -> List[str]:
         """Extract team names from the team selector."""
         try:
@@ -920,77 +1027,11 @@ class NCAAScraper(BaseScraper):
             return []
     
     def _extract_team_data(self, team_selector, team_name: str, opponent_name: str, game_id: str, game_link: str) -> Optional[TeamData]:
-        """Extract data for a single team."""
-        try:
-            # Wait for box score table
-            boxscore_table = SeleniumUtils.wait_for_element(
-                self.driver, By.CLASS_NAME, 'gamecenter-tab-boxscore', self.config.wait_timeout
-            )
-            if not boxscore_table:
-                self.logger.warning(f"Box score table not found")
-                return None
-            
-            # Wrap these in safe_driver_operation to prevent HTTPConnectionPool timeouts
-            table = SeleniumUtils.safe_driver_operation(
-                self.driver,
-                lambda: boxscore_table.find_element(By.TAG_NAME, 'table'),
-                timeout=20,  # Shorter timeout to fail fast
-                default_return=None,
-                operation_name=f"find table for {team_name}"
-            )
-            
-            if not table:
-                self.logger.warning(f"Table element not found for {team_name}")
-                return None
-            
-            outer_html = SeleniumUtils.safe_driver_operation(
-                self.driver,
-                lambda: table.get_attribute('outerHTML'),
-                timeout=20,  # Shorter timeout to fail fast
-                default_return=None,
-                operation_name=f"get outerHTML for {team_name}"
-            )
-            
-            if not outer_html:
-                self.logger.warning(f"Could not get outerHTML for {team_name}")
-                return None
-            
-            df = pd.read_html(StringIO(outer_html))[0]
-            
-            if df.empty:
-                self.logger.warning(f"Empty box score data for team {team_name}")
-                return None
-            
-            # Remove last 2 rows (typically totals) from individual team data
-            if len(df) > 2:
-                df = df.iloc[:-2]
-            
-            return TeamData(
-                team_name=team_name,
-                opponent_name=opponent_name,
-                game_id=game_id,
-                game_link=game_link,
-                stats=df
-            )
-            
-        except Exception as e:
-            error_str = str(e)
-            if "HTTPConnectionPool" in error_str or "Read timed out" in error_str:
-                self.logger.error(f"Driver frozen while extracting team data for {team_name}: {e}")
-            else:
-                self.logger.error(f"Error extracting team data for {team_name}: {e}")
-            return None
+        """Extract data for a single team - DEPRECATED, using individual_stats now."""
+        # This method is kept for compatibility but individual stats parsing is done in _scrape_single_game
+        return None
     
     def _switch_to_second_team(self, team_selector, second_team_name: str) -> bool:
-        """Switch to the second team's data."""
-        try:
-            child_divs = team_selector.find_elements(By.TAG_NAME, "div")
-            for div in child_divs:
-                if div.text.strip() == second_team_name:
-                    SeleniumUtils.safe_click(div)
-                    time.sleep(self.config.sleep_time)  # Wait for the switch
-                    return True
-            return False
-        except Exception as e:
-            self.logger.error(f"Error switching to second team: {e}")
-            return False
+        """Switch to the second team's data - DEPRECATED, using individual_stats now."""
+        # This method is kept for compatibility but individual stats parsing is done in _scrape_single_game
+        return False
