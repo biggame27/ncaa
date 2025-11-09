@@ -884,6 +884,14 @@ class NCAAScraper(BaseScraper):
                         name_elem = cells[1].find('a')
                         player_name = name_elem.get_text(strip=True) if name_elem else cells[1].get_text(strip=True)
                         
+                        # Extract player ID from href (e.g., /players/10804376 -> 10804376)
+                        player_id = ''
+                        if name_elem and name_elem.get('href'):
+                            href = name_elem.get('href')
+                            # Extract the ID from the href (last part after /players/)
+                            if '/players/' in href:
+                                player_id = href.split('/players/')[-1].split('/')[0].split('?')[0]
+                        
                         position = cells[2].get_text(strip=True) if len(cells) > 2 else ''
                         
                         # Convert minutes from "MM:SS" to decimal
@@ -916,6 +924,7 @@ class NCAAScraper(BaseScraper):
                         player_dict = {
                             'NO': player_num,
                             'Name': player_name,
+                            'PlayerID': player_id,
                             'POS': position,
                             'MIN': minutes,
                             'FGM-A': fgm_a,
@@ -963,7 +972,7 @@ class NCAAScraper(BaseScraper):
                 opponent_name=team2_name,
                 game_id=game_id,
                 game_link=game_link,
-                stats=team1_df[['NO', 'Name', 'POS', 'MIN', 'FGM-A', '3PM-A', 'FTM-A', 'OREB', 'REB', 'AST', 'ST', 'BLK', 'TO', 'PF', 'PTS', 'Unnamed: 15']]
+                stats=team1_df[['NO', 'Name', 'PlayerID', 'POS', 'MIN', 'FGM-A', '3PM-A', 'FTM-A', 'OREB', 'REB', 'AST', 'ST', 'BLK', 'TO', 'PF', 'PTS', 'Unnamed: 15']]
             )
             
             team_two_data = TeamData(
@@ -971,7 +980,7 @@ class NCAAScraper(BaseScraper):
                 opponent_name=team1_name,
                 game_id=game_id,
                 game_link=game_link,
-                stats=team2_df[['NO', 'Name', 'POS', 'MIN', 'FGM-A', '3PM-A', 'FTM-A', 'OREB', 'REB', 'AST', 'ST', 'BLK', 'TO', 'PF', 'PTS', 'Unnamed: 15']]
+                stats=team2_df[['NO', 'Name', 'PlayerID', 'POS', 'MIN', 'FGM-A', '3PM-A', 'FTM-A', 'OREB', 'REB', 'AST', 'ST', 'BLK', 'TO', 'PF', 'PTS', 'Unnamed: 15']]
             )
             
             # Check if this is a cross-division duplicate
