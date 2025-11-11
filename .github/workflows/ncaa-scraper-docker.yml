@@ -3,7 +3,7 @@ name: NCAA Basketball Scraper (Docker)
 on:
   # Run daily at 6 AM UTC (adjust timezone as needed)
   schedule:
-    - cron: '30 8 * * *'
+    - cron: '0 10 * * *'
   
   # Allow manual triggering
   workflow_dispatch:
