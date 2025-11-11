@@ -57,7 +57,8 @@ class NCAAScraper(BaseScraper):
                 return []
             
             # Check if data already exists in Google Drive (if enabled)
-            if self.config.upload_to_gdrive:
+            # Skip this check if force_rescrape is enabled
+            if self.config.upload_to_gdrive and not getattr(self, 'force_rescrape', False):
                 gdrive_exists, gdrive_file_id = self.google_drive.check_file_exists_in_gdrive(
                     year, month, gender, division, day
                 )

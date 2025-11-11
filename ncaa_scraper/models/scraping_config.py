@@ -26,6 +26,7 @@ class ScrapingConfig:
     output_dir: str
     upload_to_gdrive: bool = False
     gdrive_folder_id: Optional[str] = None
+    force_rescrape: bool = False
     
     @classmethod
     def for_single_date(
@@ -35,7 +36,8 @@ class ScrapingConfig:
         genders: List[Gender] = None,
         output_dir: str = "scraped_data",
         upload_to_gdrive: bool = False,
-        gdrive_folder_id: Optional[str] = None
+        gdrive_folder_id: Optional[str] = None,
+        force_rescrape: bool = False
     ) -> 'ScrapingConfig':
         """Create configuration for a single date."""
         if divisions is None:
@@ -49,7 +51,8 @@ class ScrapingConfig:
             genders=genders,
             output_dir=output_dir,
             upload_to_gdrive=upload_to_gdrive,
-            gdrive_folder_id=gdrive_folder_id
+            gdrive_folder_id=gdrive_folder_id,
+            force_rescrape=force_rescrape
         )
     
     @classmethod
@@ -60,7 +63,8 @@ class ScrapingConfig:
         genders: List[Gender] = None,
         output_dir: str = "scraped_data",
         upload_to_gdrive: bool = False,
-        gdrive_folder_id: Optional[str] = None
+        gdrive_folder_id: Optional[str] = None,
+        force_rescrape: bool = False
     ) -> 'ScrapingConfig':
         """Create configuration for backfill operation."""
         if divisions is None:
@@ -74,5 +78,6 @@ class ScrapingConfig:
             genders=genders,
             output_dir=output_dir,
             upload_to_gdrive=upload_to_gdrive,
-            gdrive_folder_id=gdrive_folder_id
+            gdrive_folder_id=gdrive_folder_id,
+            force_rescrape=force_rescrape
         )

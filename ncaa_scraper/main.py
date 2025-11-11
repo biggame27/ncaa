@@ -23,6 +23,7 @@ def main():
     parser.add_argument('--upload-gdrive', action='store_true', help='Upload scraped data to Google Drive (default: enabled)')
     parser.add_argument('--no-upload-gdrive', action='store_true', help='Disable Google Drive upload')
     parser.add_argument('--gdrive-folder-id', type=str, help='Google Drive folder ID to upload to (optional)')
+    parser.add_argument('--force-rescrape', action='store_true', help='Force rescrape and override existing Google Drive files')
     parser.add_argument('--divisions', nargs='+', choices=['d1', 'd2', 'd3'], default=['d1', 'd2', 'd3'], 
                        help='Divisions to scrape (default: all divisions)')
     parser.add_argument('--genders', nargs='+', choices=['men', 'women'], default=['men', 'women'], 
@@ -69,7 +70,8 @@ def main():
                 logger.info(f"Backfilling data for {target_date}")
                 scraping_config = ScrapingConfig.for_backfill(
                     [target_date], divisions, genders, config.output_dir, 
-                    config.upload_to_gdrive, config.google_drive_folder_id
+                    config.upload_to_gdrive, config.google_drive_folder_id,
+                    force_rescrape=args.force_rescrape
                 )
                 _run_scraping_session(scraper, scraping_config)
         else:
@@ -79,7 +81,8 @@ def main():
             
             scraping_config = ScrapingConfig.for_single_date(
                 target_date, divisions, genders, config.output_dir,
-                config.upload_to_gdrive, config.google_drive_folder_id
+                config.upload_to_gdrive, config.google_drive_folder_id,
+                force_rescrape=args.force_rescrape
             )
             _run_scraping_session(scraper, scraping_config)
         
@@ -105,6 +108,9 @@ def _parse_date(date_str: str) -> date:
 
 def _run_scraping_session(scraper: NCAAScraper, scraping_config: ScrapingConfig):
     """Run a scraping session for the given configuration."""
+    # Set force_rescrape flag on scraper instance
+    scraper.force_rescrape = scraping_config.force_rescrape
+    
     # Generate URLs for all dates in range
     all_urls = []
     current_date = scraping_config.date_range.start_date
@@ -118,10 +124,12 @@ def _run_scraping_session(scraper: NCAAScraper, scraping_config: ScrapingConfig)
         all_urls.extend(urls)
         current_date += timedelta(days=1)
     
-    # Pre-check Google Drive for existing files (if enabled)
-    if scraping_config.upload_to_gdrive:
+    # Pre-check Google Drive for existing files (if enabled and not forcing rescrape)
+    if scraping_config.upload_to_gdrive and not scraping_config.force_rescrape:
         logger.info("Pre-checking Google Drive for existing files...")
         _precheck_google_drive(scraper, all_urls)
+    elif scraping_config.force_rescrape:
+        logger.info("Force rescrape enabled - will override existing Google Drive files")
     
     # Scrape each URL
     for url in all_urls:

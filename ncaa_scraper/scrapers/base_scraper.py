@@ -124,15 +124,23 @@ class BaseScraper(ABC):
                 self.logger.error("Failed to create Google Drive folder structure")
                 return False
             
+            # Check if we should force overwrite (force_rescrape flag)
+            force_overwrite = getattr(self, 'force_rescrape', False)
+            
+            if force_overwrite:
+                self.logger.info(f"Force rescrape enabled - will overwrite existing file in Google Drive if it exists")
+            
             # Check if file should be uploaded (intelligent duplicate detection)
-            should_upload, existing_file_id = self.google_drive.should_upload_file(file_path, folder_id)
+            # Skip this check if force_rescrape is enabled
+            if not force_overwrite:
+                should_upload, existing_file_id = self.google_drive.should_upload_file(file_path, folder_id)
+                
+                if not should_upload:
+                    self.logger.info(f"File already exists and is up-to-date in Google Drive, skipping upload")
+                    return True
             
-            if not should_upload:
-                self.logger.info(f"File already exists and is up-to-date in Google Drive, skipping upload")
-                return True
-            
-            # Upload the file
-            file_id = self.google_drive.upload_file(file_path, folder_id)
+            # Upload the file (with overwrite flag if force_rescrape is enabled)
+            file_id = self.google_drive.upload_file(file_path, folder_id, overwrite=force_overwrite)
             
             if file_id:
                 self.logger.info(f"Successfully uploaded to Google Drive: {file_path} (ID: {file_id})")
