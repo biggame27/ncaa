@@ -259,39 +259,42 @@ def _scrape_games_from_mapping(
             try:
                 logger.info(f"Scraping game {idx}/{len(game_links)}: {game_link}")
                 
-                # Check if duplicate and handle accordingly
+                # Check if duplicate from discovery mapping
                 mapping = getattr(scraper, 'duplicate_mapping', {})
                 game_info = mapping.get('game_links', {}).get(game_link, {})
+                is_duplicate = game_info.get('is_duplicate', False)
+                primary_division = game_info.get('primary_division', division)
                 
-                if game_info.get('is_duplicate', False):
-                    primary_division = game_info.get('primary_division')
-                    if primary_division != division:
-                        # This is a duplicate and we're not the primary division
-                        # Copy data from primary division's CSV
-                        logger.info(f"Game is duplicate, copying from {primary_division} division")
-                        primary_csv_path = scraper.file_manager.get_csv_path(year, month, day, gender, primary_division)
+                # If it's a duplicate and we're not the primary division, try to copy first
+                if is_duplicate and primary_division != division:
+                    logger.info(f"Game is duplicate (primary: {primary_division}), attempting to copy from {primary_division} division")
+                    primary_csv_path = scraper.file_manager.get_csv_path(year, month, day, gender, primary_division)
+                    
+                    # Try to read from primary CSV
+                    existing_data = scraper.csv_handler.get_game_data_by_link(primary_csv_path, game_link)
+                    if existing_data is not None and not existing_data.empty:
+                        # Mark as duplicate and copy
+                        existing_data = existing_data.copy()
+                        if 'DUPLICATE_ACROSS_DIVISIONS' not in existing_data.columns:
+                            existing_data['DUPLICATE_ACROSS_DIVISIONS'] = True
+                        else:
+                            existing_data['DUPLICATE_ACROSS_DIVISIONS'] = True
                         
-                        # Try to read from primary CSV
-                        existing_data = scraper.csv_handler.get_game_data_by_link(primary_csv_path, game_link)
-                        if existing_data is not None and not existing_data.empty:
-                            # Mark as duplicate
-                            existing_data = existing_data.copy()
-                            if 'DUPLICATE_ACROSS_DIVISIONS' not in existing_data.columns:
-                                existing_data['DUPLICATE_ACROSS_DIVISIONS'] = True
-                            else:
-                                existing_data['DUPLICATE_ACROSS_DIVISIONS'] = True
-                            
-                            # Append to current division's CSV
-                            if scraper.csv_handler.append_game_data(csv_path, existing_data):
-                                logger.info(f"Copied duplicate game data from {primary_division}")
-                                scraped_count += 1
+                        # Append to current division's CSV
+                        if scraper.csv_handler.append_game_data(csv_path, existing_data):
+                            logger.info(f"Copied duplicate game data from {primary_division}")
+                            scraped_count += 1
                             continue
                         else:
-                            logger.warning(f"Could not find game in {primary_division} CSV, will scrape instead")
+                            logger.warning(f"Failed to copy, will scrape instead")
+                    else:
+                        logger.info(f"Primary CSV doesn't exist yet, will scrape and mark as duplicate")
                 
-                # Scrape the game normally
+                # Scrape the game (will be marked as duplicate if is_duplicate and not primary division)
+                # Pass the duplicate status to the scraper
                 game_data = scraper._scrape_single_game(
-                    game_link, year, month, day, gender, division, csv_path
+                    game_link, year, month, day, gender, division, csv_path,
+                    is_duplicate_from_mapping=is_duplicate and primary_division != division
                 )
                 
                 if game_data:

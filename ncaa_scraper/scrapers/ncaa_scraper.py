@@ -652,7 +652,8 @@ class NCAAScraper(BaseScraper):
         day: str, 
         gender: str, 
         division: str,
-        csv_path: str
+        csv_path: str,
+        is_duplicate_from_mapping: bool = False
     ) -> Optional[GameData]:
         """Scrape a single game's individual stats data."""
         game_id = extract_game_id_from_url(game_link)
@@ -986,10 +987,14 @@ class NCAAScraper(BaseScraper):
             )
             
             # Check if this is a cross-division duplicate
-            is_cross_division_duplicate = (
-                game_link in self.visited_links and 
-                self.visited_links[game_link] != division
-            )
+            # Use mapping flag if provided (for parallel scraping), otherwise use visited_links
+            if is_duplicate_from_mapping:
+                is_cross_division_duplicate = True
+            else:
+                is_cross_division_duplicate = (
+                    game_link in self.visited_links and 
+                    self.visited_links[game_link] != division
+                )
             
             # Create game data
             game_data = GameData(
