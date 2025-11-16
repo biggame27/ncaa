@@ -95,6 +95,11 @@ jobs:
           echo "Docker image ncaa-scraper:latest not found!"
           exit 1
         fi
+    
+    - name: Create directories for volume mounts
+      run: |
+        mkdir -p data logs
+        chmod 777 data logs
         
     - name: Run NCAA Scraper with Docker
       run: |
@@ -136,6 +141,7 @@ jobs:
         # Run the Docker container
         docker run --rm \
           --name ncaa-scraper \
+          --shm-size=2gb \
           -v $(pwd)/data:/app/data \
           -v $(pwd)/logs:/app/logs \
           -v $(pwd)/.env:/app/.env \
