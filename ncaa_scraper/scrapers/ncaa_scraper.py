@@ -52,7 +52,8 @@ class NCAAScraper(BaseScraper):
             csv_path = self.file_manager.get_csv_path(year, month, day, gender, division)
             
             # Check if data already exists locally
-            if self.file_manager.file_exists_and_has_content(csv_path):
+            # Skip this check if force_rescrape is enabled
+            if not getattr(self, 'force_rescrape', False) and self.file_manager.file_exists_and_has_content(csv_path):
                 self.logger.info(f"Data for {gender} {division} on {year}-{month}-{day} already exists locally, skipping...")
                 return []
             

@@ -12,21 +12,6 @@ on:
         description: 'Date to scrape (YYYY/MM/DD format, leave empty for yesterday)'
         required: false
         type: string
-      divisions:
-        description: 'Divisions to scrape (space-separated: d1 d2 d3)'
-        required: false
-        default: 'd1 d2 d3'
-        type: string
-      genders:
-        description: 'Genders to scrape (space-separated: men women)'
-        required: false
-        default: 'men women'
-        type: string
-      backfill:
-        description: 'Run backfill mode'
-        required: false
-        default: false
-        type: boolean
       force_rescrape:
         description: 'Force rescrape and override existing Google Drive files'
         required: false
@@ -45,8 +30,9 @@ env:
   UPLOAD_TO_GDRIVE: true
 
 jobs:
-  scrape:
+  discover-games:
     runs-on: ubuntu-latest
+    timeout-minutes: 30  # Discovery should be fast
     
     steps:
     - name: Checkout code
@@ -65,17 +51,15 @@ jobs:
         cache-from: type=gha
         cache-to: type=gha,mode=max
         
-    - name: Provide OAuth token (use GOOGLE_TOKEN_FILE_B64)
+    - name: Provide OAuth token
       shell: bash
       run: |
-        # Recreate token.pickle from secret for mounting into the container
         if [ -n "${{ secrets.GOOGLE_TOKEN_FILE_B64 }}" ]; then
           printf '%s' '${{ secrets.GOOGLE_TOKEN_FILE_B64 }}' | base64 -d > token.pickle
         else
           echo "GOOGLE_TOKEN_FILE_B64 secret is missing" >&2; exit 1
         fi
 
-        # Create .env with required env vars (OAuth token path)
         cat > .env << EOF
         GOOGLE_CLIENT_ID=${{ secrets.GOOGLE_CLIENT_ID }}
         GOOGLE_CLIENT_SECRET=${{ secrets.GOOGLE_CLIENT_SECRET }}
@@ -88,62 +72,24 @@ jobs:
         GOOGLE_TOKEN_FILE=/app/token.pickle
         EOF
         
-    - name: Verify Docker image exists
+    - name: Create directories
       run: |
-        docker images | grep ncaa-scraper
-        if [ $? -ne 0 ]; then
-          echo "Docker image ncaa-scraper:latest not found!"
-          exit 1
-        fi
-    
-    - name: Create directories for volume mounts
-      run: |
-        mkdir -p data logs
-        chmod 777 data logs
+        mkdir -p data logs discovery
+        chmod 777 data logs discovery
         
-    - name: Run NCAA Scraper with Docker
+    - name: Run Discovery
       run: |
-        # Build arguments based on inputs
-        # Note: ENTRYPOINT in Dockerfile already includes "python main.py"
-        ARGS=""
-        
-        # Add date if provided
+        DATE_ARG=""
         if [ -n "${{ github.event.inputs.date }}" ]; then
-          ARGS="$ARGS --date ${{ github.event.inputs.date }}"
+          DATE_ARG="--date ${{ github.event.inputs.date }}"
         fi
         
-        # Add divisions
-        if [ -n "${{ github.event.inputs.divisions }}" ]; then
-          ARGS="$ARGS --divisions ${{ github.event.inputs.divisions }}"
-        else
-          ARGS="$ARGS --divisions d1 d2 d3"
-        fi
-        
-        # Add genders
-        if [ -n "${{ github.event.inputs.genders }}" ]; then
-          ARGS="$ARGS --genders ${{ github.event.inputs.genders }}"
-        else
-          ARGS="$ARGS --genders men women"
-        fi
-        
-        # Add backfill flag if requested
-        if [ "${{ github.event.inputs.backfill }}" = "true" ]; then
-          ARGS="$ARGS --backfill"
-        fi
-        
-        # Add force-rescrape flag if requested
-        if [ "${{ github.event.inputs.force_rescrape }}" = "true" ]; then
-          ARGS="$ARGS --force-rescrape"
-        fi
-        
-        echo "Running command: python main.py$ARGS"
-        
-        # Run the Docker container
         docker run --rm \
-          --name ncaa-scraper \
+          --name ncaa-scraper-discovery \
           --shm-size=2gb \
-          -v $(pwd)/data:/app/data \
-          -v $(pwd)/logs:/app/logs \
+          --memory=4g \
+          --memory-swap=4g \
+          -v $(pwd)/discovery:/app/discovery \
           -v $(pwd)/.env:/app/.env \
           -v $(pwd)/token.pickle:/app/token.pickle \
           -e PYTHONUNBUFFERED=1 \
@@ -156,35 +102,147 @@ jobs:
           -e WDM_LOCAL=1 \
           -e UPLOAD_TO_GDRIVE=true \
           ncaa-scraper:latest \
-          $ARGS
+          --discover $DATE_ARG
         
-    - name: Upload scraped data as artifact
+    - name: Upload discovery mapping
       uses: actions/upload-artifact@v4
       if: always()
       with:
-        name: scraped-data-${{ github.run_number }}
-        path: data/
-        retention-days: 30
-        
-    - name: Upload logs as artifact
-      uses: actions/upload-artifact@v4
-      if: always()
-      with:
-        name: logs-${{ github.run_number }}
-        path: logs/
-        retention-days: 7
-        
-    - name: Notify on failure
-      if: failure()
-      run: |
-        echo "Scraping failed! Check the logs for details."
-        # The Discord notification will be sent automatically by the scraper
-        # if DISCORD_WEBHOOK_URL is configured
+        name: game-links-mapping
+        path: discovery/game_links_mapping.json
+        retention-days: 1
         
     - name: Cleanup
       if: always()
       run: |
-        # Remove sensitive files
         rm -f credentials.json .env token.pickle
-        # Clean up any remaining containers
+        docker container prune -f
+
+  scrape:
+    needs: discover-games
+    runs-on: ubuntu-latest
+    timeout-minutes: 120  # Each job should be much shorter now
+    strategy:
+      matrix:
+        include:
+          - division: d1
+            gender: men
+          - division: d1
+            gender: women
+          - division: d2
+            gender: men
+          - division: d2
+            gender: women
+          - division: d3
+            gender: men
+          - division: d3
+            gender: women
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+      
+    - name: Build Docker image
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        push: false
+        tags: ncaa-scraper:latest
+        load: true
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+        
+    - name: Download discovery mapping
+      uses: actions/download-artifact@v4
+      with:
+        name: game-links-mapping
+        path: discovery/
+        
+    - name: Provide OAuth token
+      shell: bash
+      run: |
+        if [ -n "${{ secrets.GOOGLE_TOKEN_FILE_B64 }}" ]; then
+          printf '%s' '${{ secrets.GOOGLE_TOKEN_FILE_B64 }}' | base64 -d > token.pickle
+        else
+          echo "GOOGLE_TOKEN_FILE_B64 secret is missing" >&2; exit 1
+        fi
+
+        cat > .env << EOF
+        GOOGLE_CLIENT_ID=${{ secrets.GOOGLE_CLIENT_ID }}
+        GOOGLE_CLIENT_SECRET=${{ secrets.GOOGLE_CLIENT_SECRET }}
+        GOOGLE_REDIRECT_URI=${{ secrets.GOOGLE_REDIRECT_URI }}
+        GOOGLE_DRIVE_FOLDER_ID=${{ secrets.GOOGLE_DRIVE_FOLDER_ID }}
+        DISCORD_WEBHOOK_URL=${{ secrets.DISCORD_WEBHOOK_URL }}
+        OUTPUT_DIR=/app/data
+        LOG_LEVEL=INFO
+        UPLOAD_TO_GDRIVE=true
+        GOOGLE_TOKEN_FILE=/app/token.pickle
+        EOF
+        
+    - name: Create directories
+      run: |
+        mkdir -p data logs
+        chmod 777 data logs
+        
+    - name: Run Scraper for ${{ matrix.division }} ${{ matrix.gender }}
+      run: |
+        DATE_ARG=""
+        if [ -n "${{ github.event.inputs.date }}" ]; then
+          DATE_ARG="--date ${{ github.event.inputs.date }}"
+        fi
+        
+        FORCE_ARG=""
+        if [ "${{ github.event.inputs.force_rescrape }}" = "true" ]; then
+          FORCE_ARG="--force-rescrape"
+        fi
+        
+        docker run --rm \
+          --name ncaa-scraper-${{ matrix.division }}-${{ matrix.gender }} \
+          --shm-size=2gb \
+          --memory=4g \
+          --memory-swap=4g \
+          -v $(pwd)/data:/app/data \
+          -v $(pwd)/logs:/app/logs \
+          -v $(pwd)/discovery:/app/discovery \
+          -v $(pwd)/.env:/app/.env \
+          -v $(pwd)/token.pickle:/app/token.pickle \
+          -e PYTHONUNBUFFERED=1 \
+          -e OUTPUT_DIR=/app/data \
+          -e DISPLAY=:99 \
+          -e CHROME_BIN=/usr/bin/google-chrome \
+          -e CHROME_PATH=/usr/bin/google-chrome \
+          -e DOCKER_CONTAINER=true \
+          -e WDM_LOG_LEVEL=0 \
+          -e WDM_LOCAL=1 \
+          -e UPLOAD_TO_GDRIVE=true \
+          ncaa-scraper:latest \
+          --single-division ${{ matrix.division }} \
+          --single-gender ${{ matrix.gender }} \
+          --mapping-file /app/discovery/game_links_mapping.json \
+          $DATE_ARG \
+          $FORCE_ARG
+        
+    - name: Upload scraped data
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: scraped-data-${{ matrix.division }}-${{ matrix.gender }}-${{ github.run_number }}
+        path: data/
+        retention-days: 30
+        
+    - name: Upload logs
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: logs-${{ matrix.division }}-${{ matrix.gender }}-${{ github.run_number }}
+        path: logs/
+        retention-days: 7
+        
+    - name: Cleanup
+      if: always()
+      run: |
+        rm -f credentials.json .env token.pickle
         docker container prune -f
