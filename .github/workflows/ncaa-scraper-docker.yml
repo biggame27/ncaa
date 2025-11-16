@@ -27,6 +27,11 @@ on:
         required: false
         default: false
         type: boolean
+      force_rescrape:
+        description: 'Force rescrape and override existing Google Drive files'
+        required: false
+        default: false
+        type: boolean
 
 env:
   PYTHONUNBUFFERED: 1
@@ -119,6 +124,11 @@ jobs:
         # Add backfill flag if requested
         if [ "${{ github.event.inputs.backfill }}" = "true" ]; then
           ARGS="$ARGS --backfill"
+        fi
+        
+        # Add force-rescrape flag if requested
+        if [ "${{ github.event.inputs.force_rescrape }}" = "true" ]; then
+          ARGS="$ARGS --force-rescrape"
         fi
         
         echo "Running command: python main.py$ARGS"
