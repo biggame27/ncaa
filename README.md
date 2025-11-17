@@ -21,6 +21,7 @@ This scraper automatically collects NCAA basketball box score data from [stats.n
 - 🔔 Discord notifications for errors and warnings
 - 🧪 Comprehensive error handling and logging
 - 🔧 Modular, extensible architecture
+- ⚡ **Parallel scraping** - Scrape multiple divisions/genders simultaneously for faster processing
 
 ### What Gets Scraped
 
@@ -72,16 +73,28 @@ ncaa_scraper/
 5. **Extensibility** - Base classes for easy extension and plugin-like architecture
 6. **Modern Data Source** - Uses stats.ncaa.org for more reliable scraping with lighter HTML and better performance
 7. **Bot Protection Handling** - Uses undetected_chromedriver to handle Akamai bot protection
+8. **Parallel Processing** - Discovery + matrix strategy enables concurrent scraping of multiple divisions/genders, dramatically reducing total execution time
 
 ### How It Works
 
-The scraper:
+The scraper supports two modes:
+
+**Standard Mode:**
 1. Generates scoreboard URLs for stats.ncaa.org based on date, division, and gender
 2. Navigates to the scoreboard page and extracts game contest IDs
 3. For each game, visits the individual stats page (`/contests/{contest_id}/individual_stats`)
 4. Parses player statistics from HTML tables using BeautifulSoup
 5. Exports data to CSV files with organized folder structure
 6. Optionally uploads to Google Drive with duplicate detection
+
+**Parallel Mode (Discovery + Matrix Scraping):**
+1. **Discovery Phase**: Extracts all game links from all divisions/genders and identifies cross-division duplicates
+2. **Parallel Scraping**: Runs multiple scraping jobs simultaneously (one per division/gender combination)
+3. Each parallel job scrapes only its assigned division/gender, using the discovery mapping to avoid duplicate work
+4. Duplicate games are intelligently copied from the primary division instead of being re-scraped
+5. Results are merged and uploaded to Google Drive
+
+This parallel approach significantly reduces total scraping time by processing multiple divisions/genders concurrently.
 
 ## ⚙️ Configuration & Setup
 
@@ -179,6 +192,13 @@ python main.py --output-dir /path/to/data
 
 # Backfill specific dates
 python main.py --backfill
+
+# Discovery mode: Extract game links and identify duplicates
+python main.py --discover --date 2025/01/15
+
+# Parallel scraping: Scrape single division/gender with mapping file
+python main.py --single-division d1 --single-gender men \
+  --mapping-file discovery/game_links_mapping.json --date 2025/01/15
 ```
 
 ### Docker Development
@@ -329,7 +349,14 @@ The scraper prevents unnecessary uploads by:
 
 ### Workflow Options
 - `/.github/workflows/ncaa-scraper.yml` (regular): faster startup
-- `/.github/workflows/ncaa-scraper-docker.yml` (docker): highest reproducibility
+- `/.github/workflows/ncaa-scraper-docker.yml` (docker): **Parallel scraping with matrix strategy**
+
+The Docker workflow implements parallelization:
+1. **Discovery Job**: Extracts all game links and identifies duplicates (runs first)
+2. **Scraping Jobs**: 6 parallel jobs (one per division/gender combination) that run simultaneously
+   - Each job processes only its assigned division/gender
+   - Uses the discovery mapping to avoid duplicate scraping
+   - Significantly faster than sequential processing
 
 Both run daily at 06:00 UTC. Disable `schedule` in one if you only want a single daily run.
 
