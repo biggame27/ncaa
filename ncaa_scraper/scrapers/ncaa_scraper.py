@@ -773,14 +773,21 @@ class NCAAScraper(BaseScraper):
                 else:
                     raise
             
-            # Wait for page to be ready
+            # Wait for stat tables to actually appear in the DOM
             wait = WebDriverWait(self.driver, self.config.wait_timeout)
-            
             try:
-                wait.until(EC.presence_of_element_located((By.TAG_NAME, "body")))
-                time.sleep(1)
+                # Wait for at least one stat table to appear
+                wait.until(
+                    EC.presence_of_element_located(
+                        (By.CSS_SELECTOR, "table[id*='competitor_'][id*='_year_stat_category_0_data_table']")
+                    )
+                )
+                # Give it a moment for the second table to load
+                time.sleep(2)
+                self.logger.debug(f"Stat tables found in DOM for {game_link}")
             except TimeoutException:
-                self.logger.warning(f"Page body not found, page may not be loaded properly")
+                self.logger.warning(f"Stat tables not found in DOM for {game_link} after waiting, page may not be loaded properly")
+                # Still try to get page source in case tables are there but selector didn't match
             
             # Get page source and parse with BeautifulSoup
             html = SeleniumUtils.safe_driver_operation(
