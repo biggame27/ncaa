@@ -802,7 +802,16 @@ class NCAAScraper(BaseScraper):
             stat_tables = soup.find_all('table', id=re.compile(r'competitor_\d+_year_stat_category_0_data_table'))
             
             if len(stat_tables) < 2:
-                self.logger.warning(f"Could not find both team stat tables for {game_link}")
+                error_msg = f"Could not find both team stat tables for {game_link}"
+                self.logger.warning(error_msg)
+                self.send_notification(
+                    error_msg,
+                    ErrorType.GAME_ERROR,
+                    division=division,
+                    date=f"{year}-{month}-{day}",
+                    gender=gender,
+                    game_link=game_link
+                )
                 return None
             
             all_players = []
