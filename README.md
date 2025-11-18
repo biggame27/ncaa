@@ -199,6 +199,14 @@ python main.py --discover --date 2025/01/15
 # Parallel scraping: Scrape single division/gender with mapping file
 python main.py --single-division d1 --single-gender men \
   --mapping-file discovery/game_links_mapping.json --date 2025/01/15
+
+# Test a single game: Check if a specific game is scrapeable
+python main.py --test-game https://stats.ncaa.org/contests/6458485/individual_stats \
+  --test-game-date 2025/01/15 --test-game-division d1 --test-game-gender men
+
+# Test a single game using just contest ID
+python main.py --test-game 6458485 \
+  --test-game-date 2025/01/15 --test-game-division d1 --test-game-gender men
 ```
 
 ### Docker Development

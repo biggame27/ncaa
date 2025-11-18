@@ -36,6 +36,10 @@ def main():
     parser.add_argument('--mapping-file', type=str, help='Path to game links mapping JSON file (for single division/gender scraping)')
     parser.add_argument('--single-division', type=str, choices=['d1', 'd2', 'd3'], help='Scrape single division (requires --mapping-file)')
     parser.add_argument('--single-gender', type=str, choices=['men', 'women'], help='Scrape single gender (requires --mapping-file)')
+    parser.add_argument('--test-game', type=str, help='Test scraping a single game by URL or contest ID (e.g., https://stats.ncaa.org/contests/6458485/individual_stats or 6458485)')
+    parser.add_argument('--test-game-date', type=str, help='Date for test game in YYYY/MM/DD format (required if using --test-game with contest ID only)')
+    parser.add_argument('--test-game-division', type=str, choices=['d1', 'd2', 'd3'], default='d1', help='Division for test game (default: d1)')
+    parser.add_argument('--test-game-gender', type=str, choices=['men', 'women'], default='men', help='Gender for test game (default: men)')
     
     args = parser.parse_args()
     
@@ -62,6 +66,76 @@ def main():
     import os
     os.makedirs(config.output_dir, exist_ok=True)
     logger.info(f"Output directory: {os.path.abspath(config.output_dir)}")
+    
+    # Handle test game mode
+    if args.test_game:
+        logger.info(f"Test game mode: testing {args.test_game}")
+        try:
+            # Parse game URL or contest ID
+            game_link = args.test_game
+            if not game_link.startswith('http'):
+                # It's just a contest ID, construct the URL
+                contest_id = game_link
+                game_link = f"https://stats.ncaa.org/contests/{contest_id}/individual_stats"
+                logger.info(f"Constructed game URL from contest ID: {game_link}")
+            
+            # Get date, division, and gender
+            if args.test_game_date:
+                target_date = _parse_date(args.test_game_date)
+            else:
+                # If no date provided, use today as fallback (for testing purposes)
+                logger.warning("Date not provided for test game, using today's date")
+                from datetime import date
+                target_date = date.today()
+            
+            year = str(target_date.year)
+            month = f"{target_date.month:02d}"
+            day = f"{target_date.day:02d}"
+            division = args.test_game_division
+            gender = args.test_game_gender
+            
+            # Initialize scraper
+            scraper = NCAAScraper(config)
+            scraper.force_rescrape = True  # Always force for testing
+            
+            # Create CSV path for test output
+            csv_path = scraper.file_manager.get_csv_path(year, month, day, gender, division)
+            logger.info(f"Test output will be saved to: {csv_path}")
+            
+            # Initialize driver
+            try:
+                scraper.driver = SeleniumUtils.create_driver(headless=True, max_retries=3)
+            except Exception as e:
+                logger.error(f"Failed to initialize WebDriver: {e}")
+                return 1
+            
+            try:
+                # Test scraping the single game
+                logger.info(f"Testing game: {game_link}")
+                game_data = scraper._scrape_single_game(
+                    game_link, year, month, day, gender, division, csv_path
+                )
+                
+                if game_data:
+                    logger.info("✓ Game is scrapeable!")
+                    logger.info(f"  Game ID: {game_data.game_id}")
+                    logger.info(f"  Teams: {game_data.team_one.team_name} vs {game_data.team_two.team_name}")
+                    logger.info(f"  Players scraped: {len(game_data.team_one.stats) + len(game_data.team_two.stats)}")
+                    logger.info(f"  Data saved to: {csv_path}")
+                    return 0
+                else:
+                    logger.error("✗ Game scraping failed or returned no data")
+                    return 1
+                    
+            finally:
+                if scraper.driver:
+                    SeleniumUtils.safe_quit_driver(scraper.driver)
+                    scraper.driver = None
+                    SeleniumUtils._cleanup_driver_resources()
+                    
+        except Exception as e:
+            logger.error(f"Error testing game: {e}", exc_info=True)
+            return 1
     
     # Handle discovery mode
     if args.discover:
